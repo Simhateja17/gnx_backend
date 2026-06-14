@@ -1,0 +1,34 @@
+import { Router } from 'express';
+import authRoutes from './auth.routes';
+import onboardingRoutes from './onboarding.routes';
+import gmailRoutes from './gmail.routes';
+import campaignsRoutes from './campaigns.routes';
+import leadsRoutes from './leads.routes';
+import emailsRoutes from './emails.routes';
+import inboxRoutes from './inbox.routes';
+import voiceRoutes from './voice.routes';
+import aiRoutes from './ai.routes';
+import billingRoutes from './billing.routes';
+import dashboardRoutes from './dashboard.routes';
+import settingsRoutes from './settings.routes';
+import adminRoutes from './admin.routes';
+import supportRoutes from './support.routes';
+
+const router = Router();
+
+router.use('/auth', authRoutes);
+router.use('/onboarding', onboardingRoutes);
+router.use('/gmail', gmailRoutes);
+router.use('/campaigns', campaignsRoutes);
+router.use('/leads', leadsRoutes);
+router.use('/emails', emailsRoutes);
+router.use('/inbox', inboxRoutes);
+router.use('/voice', voiceRoutes);
+router.use('/ai', aiRoutes);
+router.use('/billing', billingRoutes);
+router.use('/dashboard', dashboardRoutes);
+router.use('/settings', settingsRoutes);
+router.use('/admin', adminRoutes);
+router.use('/support', supportRoutes);
+
+export default router;
