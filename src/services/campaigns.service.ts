@@ -1,1 +1,292 @@
-// TODO: implement campaigns.service
+import { supabase } from '../lib/supabase';
+import { AppError } from '../types';
+import type { CampaignCreateInput, CampaignUpdateInput } from '../schemas/campaigns.schema';
+
+type CampaignRow = {
+  id: string;
+  organization_id: string;
+  name: string;
+  channel: 'email' | 'voice';
+  status: 'draft' | 'active' | 'paused' | 'completed';
+  agent_config_id: string | null;
+  prompt_context: string | null;
+  max_leads: number;
+  daily_send_cap: number;
+  call_cadence_per_hour: number;
+  voice_mode: 'ai' | 'manual';
+  business_hours_start: string;
+  business_hours_end: string;
+  timezone: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type CampaignStats = {
+  enrolled: number;
+  sent: number;
+  meetings: number;
+};
+
+const CAMPAIGN_COLUMNS = [
+  'id',
+  'organization_id',
+  'name',
+  'channel',
+  'status',
+  'agent_config_id',
+  'prompt_context',
+  'max_leads',
+  'daily_send_cap',
+  'call_cadence_per_hour',
+  'voice_mode',
+  'business_hours_start',
+  'business_hours_end',
+  'timezone',
+  'created_at',
+  'updated_at',
+].join(',');
+
+function parsePromptContext(value: string | null) {
+  if (!value) return { icpSource: '', promptNotes: '' };
+  try {
+    const parsed = JSON.parse(value) as { icpSource?: string; promptNotes?: string };
+    return {
+      icpSource: parsed.icpSource ?? value,
+      promptNotes: parsed.promptNotes ?? '',
+    };
+  } catch {
+    return { icpSource: value, promptNotes: '' };
+  }
+}
+
+function serializePromptContext(data: Partial<CampaignCreateInput>) {
+  return JSON.stringify({
+    icpSource: data.icpSource ?? '',
+    promptNotes: data.promptNotes ?? '',
+  });
+}
+
+function toApiCampaign(row: CampaignRow, stats?: CampaignStats) {
+  const prompt = parsePromptContext(row.prompt_context);
+
+  return {
+    id: row.id,
+    name: row.name,
+    channel: row.channel,
+    status: row.status,
+    icpSource: prompt.icpSource,
+    promptNotes: prompt.promptNotes,
+    maxLeads: row.max_leads,
+    dailySendCap: row.daily_send_cap,
+    callCadencePerHour: row.call_cadence_per_hour,
+    voiceMode: row.voice_mode,
+    businessHoursStart: row.business_hours_start?.slice(0, 5),
+    businessHoursEnd: row.business_hours_end?.slice(0, 5),
+    timezone: row.timezone,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    stats: stats ?? { enrolled: 0, sent: 0, meetings: 0 },
+  };
+}
+
+async function getDefaultAgentConfigId(orgId: string) {
+  const { data, error } = await supabase
+    .from('agent_configs')
+    .select('id')
+    .eq('organization_id', orgId)
+    .maybeSingle();
+
+  if (error) throw new AppError(500, 'Failed to read agent configuration', error);
+  return data?.id ?? null;
+}
+
+async function getStatsByCampaign(orgId: string, campaignIds: string[]) {
+  const stats = new Map<string, CampaignStats>();
+  campaignIds.forEach(id => stats.set(id, { enrolled: 0, sent: 0, meetings: 0 }));
+
+  if (campaignIds.length === 0) return stats;
+
+  const [leadsResult, emailResult, callsResult] = await Promise.all([
+    supabase
+      .from('leads')
+      .select('campaign_id,status')
+      .eq('organization_id', orgId)
+      .in('campaign_id', campaignIds),
+    supabase
+      .from('email_messages')
+      .select('campaign_id,status')
+      .eq('organization_id', orgId)
+      .in('campaign_id', campaignIds),
+    supabase
+      .from('calls')
+      .select('campaign_id,disposition')
+      .eq('organization_id', orgId)
+      .in('campaign_id', campaignIds),
+  ]);
+
+  if (leadsResult.error) throw new AppError(500, 'Failed to read campaign leads', leadsResult.error);
+  if (emailResult.error) throw new AppError(500, 'Failed to read campaign messages', emailResult.error);
+  if (callsResult.error) throw new AppError(500, 'Failed to read campaign calls', callsResult.error);
+
+  for (const lead of leadsResult.data ?? []) {
+    if (!lead.campaign_id) continue;
+    const entry = stats.get(lead.campaign_id);
+    if (!entry) continue;
+    entry.enrolled += 1;
+    if (lead.status === 'meeting_booked') entry.meetings += 1;
+  }
+
+  for (const message of emailResult.data ?? []) {
+    if (!message.campaign_id || message.status !== 'sent') continue;
+    const entry = stats.get(message.campaign_id);
+    if (entry) entry.sent += 1;
+  }
+
+  for (const call of callsResult.data ?? []) {
+    if (!call.campaign_id || call.disposition !== 'meeting_booked') continue;
+    const entry = stats.get(call.campaign_id);
+    if (entry) entry.meetings += 1;
+  }
+
+  return stats;
+}
+
+export async function listCampaigns(orgId: string) {
+  const { data, error } = await supabase
+    .from('campaigns')
+    .select(CAMPAIGN_COLUMNS)
+    .eq('organization_id', orgId)
+    .order('created_at', { ascending: false });
+
+  if (error) throw new AppError(500, 'Failed to fetch campaigns', error);
+
+  const rows = (data ?? []) as unknown as CampaignRow[];
+  const stats = await getStatsByCampaign(orgId, rows.map(row => row.id));
+  const items = rows.map(row => toApiCampaign(row, stats.get(row.id)));
+  const summary = items.reduce(
+    (acc, item) => {
+      acc.total += 1;
+      acc.active += item.status === 'active' ? 1 : 0;
+      acc.enrolled += item.stats.enrolled;
+      acc.sent += item.stats.sent;
+      acc.meetings += item.stats.meetings;
+      return acc;
+    },
+    { total: 0, active: 0, enrolled: 0, sent: 0, meetings: 0 }
+  );
+
+  return { items, summary };
+}
+
+export async function createCampaign(orgId: string, input: CampaignCreateInput) {
+  const agentConfigId = await getDefaultAgentConfigId(orgId);
+  const record = {
+    organization_id: orgId,
+    name: input.name,
+    channel: input.channel,
+    status: 'draft',
+    agent_config_id: agentConfigId,
+    prompt_context: serializePromptContext(input),
+    max_leads: input.maxLeads,
+    daily_send_cap: input.dailySendCap,
+    call_cadence_per_hour: input.callCadencePerHour,
+    voice_mode: input.voiceMode,
+    business_hours_start: input.businessHoursStart,
+    business_hours_end: input.businessHoursEnd,
+    timezone: input.timezone,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase
+    .from('campaigns')
+    .insert(record)
+    .select(CAMPAIGN_COLUMNS)
+    .single();
+
+  if (error) throw new AppError(500, 'Failed to create campaign', error);
+  return toApiCampaign(data as unknown as CampaignRow);
+}
+
+export async function getCampaign(orgId: string, id: string) {
+  const { data, error } = await supabase
+    .from('campaigns')
+    .select(CAMPAIGN_COLUMNS)
+    .eq('organization_id', orgId)
+    .eq('id', id)
+    .maybeSingle();
+
+  if (error) throw new AppError(500, 'Failed to fetch campaign', error);
+  if (!data) throw new AppError(404, 'Campaign not found');
+
+  const stats = await getStatsByCampaign(orgId, [id]);
+  return toApiCampaign(data as unknown as CampaignRow, stats.get(id));
+}
+
+export async function updateCampaign(orgId: string, id: string, input: CampaignUpdateInput) {
+  const current = await getCampaign(orgId, id);
+  const record: Record<string, unknown> = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (input.name !== undefined) record.name = input.name;
+  if (input.channel !== undefined) record.channel = input.channel;
+  if (input.maxLeads !== undefined) record.max_leads = input.maxLeads;
+  if (input.dailySendCap !== undefined) record.daily_send_cap = input.dailySendCap;
+  if (input.callCadencePerHour !== undefined) record.call_cadence_per_hour = input.callCadencePerHour;
+  if (input.voiceMode !== undefined) record.voice_mode = input.voiceMode;
+  if (input.businessHoursStart !== undefined) record.business_hours_start = input.businessHoursStart;
+  if (input.businessHoursEnd !== undefined) record.business_hours_end = input.businessHoursEnd;
+  if (input.timezone !== undefined) record.timezone = input.timezone;
+
+  if (input.icpSource !== undefined || input.promptNotes !== undefined) {
+    record.prompt_context = serializePromptContext({
+      icpSource: input.icpSource ?? current.icpSource,
+      promptNotes: input.promptNotes ?? current.promptNotes,
+    });
+  }
+
+  const { data, error } = await supabase
+    .from('campaigns')
+    .update(record)
+    .eq('organization_id', orgId)
+    .eq('id', id)
+    .select(CAMPAIGN_COLUMNS)
+    .maybeSingle();
+
+  if (error) throw new AppError(500, 'Failed to update campaign', error);
+  if (!data) throw new AppError(404, 'Campaign not found');
+  return toApiCampaign(data as unknown as CampaignRow, current.stats);
+}
+
+export async function setCampaignStatus(
+  orgId: string,
+  id: string,
+  status: 'active' | 'paused' | 'completed'
+) {
+  const { data, error } = await supabase
+    .from('campaigns')
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq('organization_id', orgId)
+    .eq('id', id)
+    .select(CAMPAIGN_COLUMNS)
+    .maybeSingle();
+
+  if (error) throw new AppError(500, `Failed to set campaign ${status}`, error);
+  if (!data) throw new AppError(404, 'Campaign not found');
+  const stats = await getStatsByCampaign(orgId, [id]);
+  return toApiCampaign(data as unknown as CampaignRow, stats.get(id));
+}
+
+export async function deleteCampaign(orgId: string, id: string) {
+  const { data, error } = await supabase
+    .from('campaigns')
+    .delete()
+    .eq('organization_id', orgId)
+    .eq('id', id)
+    .select('id')
+    .maybeSingle();
+
+  if (error) throw new AppError(500, 'Failed to delete campaign', error);
+  if (!data) throw new AppError(404, 'Campaign not found');
+  return { success: true };
+}

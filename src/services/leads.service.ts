@@ -1,1 +1,254 @@
-// TODO: implement leads.service
+import { env } from '../config/env';
+import { supabase } from '../lib/supabase';
+import { AppError } from '../types';
+import type { ApolloSearchInput, CsvUploadInput, LeadCreateInput } from '../schemas/leads.schema';
+
+type LeadRow = {
+  id: string;
+  organization_id: string;
+  campaign_id: string | null;
+  source: 'apollo' | 'csv' | 'manual';
+  apollo_id: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  name: string | null;
+  title: string | null;
+  company: string | null;
+  email: string | null;
+  phone: string | null;
+  location: string | null;
+  linkedin_url: string | null;
+  timezone: string | null;
+  score: number | null;
+  status: string;
+  raw_data: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type ApolloPerson = {
+  id?: string;
+  first_name?: string;
+  last_name?: string;
+  name?: string;
+  title?: string;
+  headline?: string;
+  email?: string;
+  phone_numbers?: Array<{ raw_number?: string; sanitized_number?: string }>;
+  organization?: { name?: string };
+  employment_history?: Array<{ organization_name?: string; current?: boolean }>;
+  city?: string;
+  state?: string;
+  country?: string;
+  linkedin_url?: string;
+  photo_url?: string;
+};
+
+const LEAD_COLUMNS = [
+  'id',
+  'organization_id',
+  'campaign_id',
+  'source',
+  'apollo_id',
+  'first_name',
+  'last_name',
+  'name',
+  'title',
+  'company',
+  'email',
+  'phone',
+  'location',
+  'linkedin_url',
+  'timezone',
+  'score',
+  'status',
+  'raw_data',
+  'created_at',
+  'updated_at',
+].join(',');
+
+function clean(value?: string | null) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function toApiLead(row: LeadRow) {
+  return {
+    id: row.id,
+    campaignId: row.campaign_id,
+    source: row.source,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    name: row.name,
+    title: row.title,
+    company: row.company,
+    email: row.email,
+    phone: row.phone,
+    location: row.location,
+    linkedinUrl: row.linkedin_url,
+    score: row.score ?? 0,
+    status: row.status,
+    createdAt: row.created_at,
+    rawData: row.raw_data,
+  };
+}
+
+function toLeadRecord(orgId: string, input: LeadCreateInput, rawData?: Record<string, unknown>) {
+  const firstName = clean(input.firstName);
+  const lastName = clean(input.lastName);
+  const name = clean(input.name) ?? ([firstName, lastName].filter(Boolean).join(' ') || null);
+
+  return {
+    organization_id: orgId,
+    campaign_id: input.campaignId ?? null,
+    source: input.source,
+    first_name: firstName,
+    last_name: lastName,
+    name,
+    title: clean(input.title),
+    company: clean(input.company),
+    email: clean(input.email),
+    phone: clean(input.phone),
+    location: clean(input.location),
+    linkedin_url: clean(input.linkedinUrl),
+    status: 'new',
+    raw_data: rawData ?? null,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function mapApolloPerson(person: ApolloPerson) {
+  const company =
+    person.organization?.name ??
+    person.employment_history?.find(item => item.current)?.organization_name ??
+    person.employment_history?.[0]?.organization_name ??
+    '';
+  const phone = person.phone_numbers?.[0]?.sanitized_number ?? person.phone_numbers?.[0]?.raw_number ?? '';
+  const location = [person.city, person.state, person.country].filter(Boolean).join(', ');
+
+  return {
+    apolloId: person.id ?? '',
+    firstName: person.first_name ?? '',
+    lastName: person.last_name ?? '',
+    name: person.name ?? [person.first_name, person.last_name].filter(Boolean).join(' '),
+    title: person.title ?? person.headline ?? '',
+    company,
+    email: person.email ?? '',
+    phone,
+    location,
+    linkedinUrl: person.linkedin_url ?? '',
+    photoUrl: person.photo_url ?? '',
+  };
+}
+
+export async function listLeads(orgId: string) {
+  const { data, error } = await supabase
+    .from('leads')
+    .select(LEAD_COLUMNS)
+    .eq('organization_id', orgId)
+    .order('created_at', { ascending: false })
+    .limit(500);
+
+  if (error) throw new AppError(500, 'Failed to fetch leads', error);
+  return { items: ((data ?? []) as unknown as LeadRow[]).map(toApiLead) };
+}
+
+export async function createLead(orgId: string, input: LeadCreateInput) {
+  const { data, error } = await supabase
+    .from('leads')
+    .insert(toLeadRecord(orgId, input))
+    .select(LEAD_COLUMNS)
+    .single();
+
+  if (error) throw new AppError(500, 'Failed to create lead', error);
+  return toApiLead(data as unknown as LeadRow);
+}
+
+export async function searchApollo(input: ApolloSearchInput) {
+  const body: Record<string, unknown> = {
+    page: input.page,
+    per_page: input.perPage,
+  };
+
+  if (input.titles.length > 0) body.person_titles = input.titles;
+  if (input.locations.length > 0) body.person_locations = input.locations;
+  if (input.companySizes.length > 0) body.organization_num_employees_ranges = input.companySizes;
+  if (input.keywords) body.q_keywords = input.keywords;
+
+  const response = await fetch('https://api.apollo.io/api/v1/mixed_people/search', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-cache',
+      'x-api-key': env.APOLLO_API_KEY,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const details = await response.text();
+    throw new AppError(response.status, 'Apollo search failed', details.slice(0, 1000));
+  }
+
+  const data = await response.json() as {
+    people?: ApolloPerson[];
+    contacts?: ApolloPerson[];
+    pagination?: { page?: number; per_page?: number; total_entries?: number; total_pages?: number };
+  };
+  const people = data.people ?? data.contacts ?? [];
+
+  return {
+    items: people.map(mapApolloPerson),
+    pagination: data.pagination ?? {
+      page: input.page,
+      perPage: input.perPage,
+      totalEntries: people.length,
+    },
+  };
+}
+
+export async function uploadCsvLeads(orgId: string, input: CsvUploadInput) {
+  const records = input.rows.map(row => toLeadRecord(
+    orgId,
+    {
+      campaignId: input.campaignId,
+      source: 'csv',
+      firstName: row.firstName,
+      lastName: row.lastName,
+      name: row.name,
+      title: row.title,
+      company: row.company,
+      email: row.email,
+      phone: row.phone,
+      location: row.location,
+      linkedinUrl: row.linkedinUrl,
+    },
+    row.rawData
+  ));
+
+  const { data, error } = await supabase
+    .from('leads')
+    .insert(records)
+    .select(LEAD_COLUMNS);
+
+  if (error) throw new AppError(500, 'Failed to upload CSV leads', error);
+
+  return {
+    inserted: data?.length ?? 0,
+    items: ((data ?? []) as unknown as LeadRow[]).map(toApiLead),
+  };
+}
+
+export async function deleteLead(orgId: string, id: string) {
+  const { data, error } = await supabase
+    .from('leads')
+    .delete()
+    .eq('organization_id', orgId)
+    .eq('id', id)
+    .select('id')
+    .maybeSingle();
+
+  if (error) throw new AppError(500, 'Failed to delete lead', error);
+  if (!data) throw new AppError(404, 'Lead not found');
+  return { success: true };
+}
