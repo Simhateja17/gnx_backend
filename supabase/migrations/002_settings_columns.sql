@@ -1,0 +1,3 @@
+ALTER TABLE agent_configs
+  ADD COLUMN IF NOT EXISTS auto_approve_replies BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS daily_email_send_cap  INTEGER  NOT NULL DEFAULT 100;
