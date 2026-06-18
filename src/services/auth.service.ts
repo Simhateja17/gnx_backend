@@ -120,6 +120,58 @@ export async function resetPassword(input: ResetPasswordInput) {
   }
 }
 
+export async function googleCallback(accessToken: string, refreshToken: string, expiresIn: number) {
+  const { data: { user: authUser }, error } = await supabase.auth.getUser(accessToken);
+  if (error || !authUser) throw new AppError(401, 'Invalid or expired Google token');
+
+  const { data: existingUser } = await supabase
+    .from('users')
+    .select('*, organizations(*)')
+    .eq('supabase_uid', authUser.id)
+    .single();
+
+  const session = { access_token: accessToken, refresh_token: refreshToken, expires_in: expiresIn };
+
+  if (existingUser) {
+    return { session, user: existingUser, organization: existingUser.organizations };
+  }
+
+  // New Google user — derive org name from email domain
+  const email = authUser.email!;
+  const fullName = ((authUser.user_metadata?.full_name || authUser.user_metadata?.name || '') as string).trim();
+  const [firstName = '', ...rest] = fullName.split(' ');
+  const lastName = rest.join(' ');
+  const domainRoot = email.split('@')[1]?.split('.')[0] || 'company';
+  const orgName = domainRoot.charAt(0).toUpperCase() + domainRoot.slice(1);
+
+  const { data: organization, error: orgError } = await supabase
+    .from('organizations')
+    .insert({ name: orgName })
+    .select()
+    .single();
+  if (orgError || !organization) throw new AppError(500, 'Failed to create organisation');
+
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .insert({
+      organization_id: organization.id,
+      supabase_uid: authUser.id,
+      email,
+      first_name: firstName,
+      last_name: lastName,
+      role: 'owner',
+    })
+    .select()
+    .single();
+
+  if (userError || !user) {
+    await supabase.from('organizations').delete().eq('id', organization.id);
+    throw new AppError(500, 'Failed to create user record');
+  }
+
+  return { session, user, organization };
+}
+
 export async function refreshSession(refreshToken: string) {
   const { data, error } = await supabaseAuth.auth.refreshSession({ refresh_token: refreshToken });
   if (error || !data.session) {
