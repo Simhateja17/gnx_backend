@@ -64,7 +64,7 @@ router.post('/reset-password', validate(resetPasswordSchema), async (req, res, n
 
 // Initiate Google OAuth — redirects browser through Supabase to Google
 router.get('/google', (req, res) => {
-  const redirectTo = encodeURIComponent(`${env.FRONTEND_URL}/auth/callback`);
+  const redirectTo = encodeURIComponent(`${env.FRONTEND_URL}/callback`);
   res.redirect(`${env.SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=${redirectTo}`);
 });
 
