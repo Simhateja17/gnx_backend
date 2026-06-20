@@ -1,8 +1,11 @@
 import { openai } from '../lib/openai';
 import { supabase } from '../lib/supabase';
 import { AppError } from '../types';
+import { withRetry } from '../lib/retry';
 import { GenerateEmailInput, GenerateReplyInput, GenerateVoicePromptInput } from '../schemas/ai.schema';
 import { z } from 'zod';
+
+const AI_TIMEOUT_MS = 30_000;
 
 const emailOutputSchema = z.object({
   subject: z.string(),
@@ -28,6 +31,27 @@ const TONE_DESCRIPTIONS: Record<string, string> = {
 
 function getToneInstruction(tone: string): string {
   return TONE_DESCRIPTIONS[tone] || TONE_DESCRIPTIONS.consultative;
+}
+
+function parseJsonSafe<T>(raw: string, schema: z.ZodType<T>, label: string): T {
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    throw new AppError(502, `AI returned malformed JSON for ${label}`);
+  }
+
+  const result = schema.safeParse(json);
+  if (!result.success) {
+    throw new AppError(502, `AI returned invalid ${label} format`);
+  }
+  return result.data;
+}
+
+function createTimeout(): { signal: AbortSignal; clear: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  return { signal: controller.signal, clear: () => clearTimeout(timer) };
 }
 
 // ── Email generation ─────────────────────────────────────────────
@@ -111,24 +135,29 @@ export async function generateEmail(orgId: string, input: GenerateEmailInput) {
   const systemPrompt = buildEmailSystemPrompt(agentConfig, campaign, agentConfig.tone, input.stepNumber);
   const userPrompt = buildEmailUserPrompt(lead, input.stepNumber, previousEmails);
 
-  const completion = await openai.chat.completions.create({
-    model: '',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0.7,
-    max_completion_tokens: 1024,
-  });
+  const raw = await withRetry(async () => {
+    const timeout = createTimeout();
+    try {
+      const completion = await openai.chat.completions.create({
+        model: '',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.7,
+        max_completion_tokens: 1024,
+      }, { signal: timeout.signal });
 
-  const raw = completion.choices[0]?.message?.content;
-  if (!raw) throw new AppError(502, 'No response from AI model');
+      const content = completion.choices[0]?.message?.content;
+      if (!content) throw new AppError(502, 'No response from AI model');
+      return content;
+    } finally {
+      timeout.clear();
+    }
+  }, { label: 'generate-email' });
 
-  const parsed = emailOutputSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success) throw new AppError(502, 'AI returned invalid email format');
-
-  return parsed.data;
+  return parseJsonSafe(raw, emailOutputSchema, 'email');
 }
 
 // ── Reply generation ─────────────────────────────────────────────
@@ -203,24 +232,29 @@ export async function generateReply(orgId: string, input: GenerateReplyInput) {
   const systemPrompt = buildReplySystemPrompt(agentConfig);
   const userPrompt = buildReplyUserPrompt(thread);
 
-  const completion = await openai.chat.completions.create({
-    model: '',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0.7,
-    max_completion_tokens: 512,
-  });
+  const raw = await withRetry(async () => {
+    const timeout = createTimeout();
+    try {
+      const completion = await openai.chat.completions.create({
+        model: '',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.7,
+        max_completion_tokens: 512,
+      }, { signal: timeout.signal });
 
-  const raw = completion.choices[0]?.message?.content;
-  if (!raw) throw new AppError(502, 'No response from AI model');
+      const content = completion.choices[0]?.message?.content;
+      if (!content) throw new AppError(502, 'No response from AI model');
+      return content;
+    } finally {
+      timeout.clear();
+    }
+  }, { label: 'generate-reply' });
 
-  const parsed = replyOutputSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success) throw new AppError(502, 'AI returned invalid reply format');
-
-  return parsed.data;
+  return parseJsonSafe(raw, replyOutputSchema, 'reply');
 }
 
 // ── Voice prompt generation ──────────────────────────────────────
