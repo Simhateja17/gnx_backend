@@ -102,6 +102,7 @@ function toLeadRecord(orgId: string, input: LeadCreateInput, rawData?: Record<st
     organization_id: orgId,
     campaign_id: input.campaignId ?? null,
     source: input.source,
+    apollo_id: clean(input.apolloId),
     first_name: firstName,
     last_name: lastName,
     name,
