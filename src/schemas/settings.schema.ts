@@ -10,6 +10,7 @@ export const updateSettingsSchema = z.object({
                       }).optional(),
   autoApproveReplies: z.boolean().optional(),
   dailyEmailSendCap:  z.number().int('Send cap must be a whole number').min(1, 'Minimum is 1').max(500, 'Maximum is 500').optional(),
+  bookingLink:        z.string().url('Must be a valid URL').optional().or(z.literal('')),
 });
 
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
