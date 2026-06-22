@@ -55,6 +55,14 @@ VALUES (
   'America/New_York'
 ) ON CONFLICT (id) DO NOTHING;
 
+-- 4b. Sequence steps for email campaign (optional custom context per step)
+INSERT INTO email_sequence_steps (id, campaign_id, step_number, delay_days, body_prompt_context)
+VALUES
+  ('44440001-0001-0001-0001-000000000001', '44444444-4444-4444-4444-444444444444', 1, 0, NULL),
+  ('44440001-0001-0001-0001-000000000002', '44444444-4444-4444-4444-444444444444', 2, 3, 'Mention our recent case study with TechCorp who went from 5 to 18 meetings per month. Focus on the ROI angle.'),
+  ('44440001-0001-0001-0001-000000000003', '44444444-4444-4444-4444-444444444444', 3, 7, 'Offer a free 14-day trial as a final incentive before closing the loop.')
+ON CONFLICT (id) DO NOTHING;
+
 -- 5. Test voice campaign
 INSERT INTO campaigns (id, organization_id, name, channel, status, agent_config_id, prompt_context, max_leads, call_cadence_per_hour, voice_mode, timezone)
 VALUES (

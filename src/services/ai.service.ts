@@ -101,6 +101,7 @@ function buildEmailSystemPrompt(
   campaign: any,
   tone: string,
   stepNumber: number,
+  stepContext?: string | null,
 ): string {
   const toneInstruction = getToneInstruction(tone);
 
@@ -120,9 +121,12 @@ TONE: ${toneInstruction}`;
     3: `Write a final breakup email. Be brief (under 80 words), acknowledge you don't want to be a nuisance, and give one last reason to connect.${agentConfig.booking_link ? ' Include the booking link as a final CTA.' : ''} Make it easy for them to say "not now" without burning the bridge.`,
   };
 
+  const task = stepInstructions[stepNumber] || stepInstructions[1];
+  const customContext = stepContext ? `\nADDITIONAL INSTRUCTIONS FOR THIS STEP: ${stepContext}` : '';
+
   return `${baseContext}
 
-TASK: ${stepInstructions[stepNumber] || stepInstructions[1]}
+TASK: ${task}${customContext}
 
 Respond with JSON: { "subject": "...", "body": "..." }
 The body should be plain text (no HTML). Use line breaks for paragraphs.`;
@@ -161,18 +165,27 @@ export async function generateEmail(orgId: string, input: GenerateEmailInput) {
   const campaign = campaignResult.data;
   const lead = leadResult.data;
 
-  let previousEmails: any[] = [];
-  if (input.stepNumber > 1) {
-    const { data } = await supabase
-      .from('email_messages')
-      .select('subject, body, created_at')
+  const [previousEmailsResult, sequenceStepResult] = await Promise.all([
+    input.stepNumber > 1
+      ? supabase
+          .from('email_messages')
+          .select('subject, body, created_at')
+          .eq('campaign_id', input.campaignId)
+          .eq('lead_id', input.leadId)
+          .order('created_at', { ascending: true })
+      : Promise.resolve({ data: [] }),
+    supabase
+      .from('email_sequence_steps')
+      .select('body_prompt_context')
       .eq('campaign_id', input.campaignId)
-      .eq('lead_id', input.leadId)
-      .order('created_at', { ascending: true });
-    previousEmails = data || [];
-  }
+      .eq('step_number', input.stepNumber)
+      .maybeSingle(),
+  ]);
 
-  const systemPrompt = sanitizeText(buildEmailSystemPrompt(agentConfig, campaign, agentConfig.tone, input.stepNumber));
+  const previousEmails = previousEmailsResult.data || [];
+  const stepContext = sequenceStepResult.data?.body_prompt_context || null;
+
+  const systemPrompt = sanitizeText(buildEmailSystemPrompt(agentConfig, campaign, agentConfig.tone, input.stepNumber, stepContext));
   const userPrompt = sanitizeText(buildEmailUserPrompt(lead, input.stepNumber, previousEmails));
 
   const raw = await withRetry(async () => {
