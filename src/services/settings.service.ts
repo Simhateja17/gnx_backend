@@ -22,7 +22,7 @@ export async function getSettings(userId: string, orgId: string) {
   // agent_configs may not exist yet if onboarding was skipped — return defaults gracefully
   const { data: config } = await supabase
     .from('agent_configs')
-    .select('tone, auto_approve_replies, daily_email_send_cap')
+    .select('tone, auto_approve_replies, daily_email_send_cap, booking_link')
     .eq('organization_id', orgId)
     .single();
 
@@ -40,6 +40,7 @@ export async function getSettings(userId: string, orgId: string) {
       tone:               config?.tone                ?? 'consultative',
       autoApproveReplies: config?.auto_approve_replies ?? false,
       dailyEmailSendCap:  config?.daily_email_send_cap ?? 100,
+      bookingLink:        config?.booking_link         ?? '',
     },
   };
 }
@@ -67,6 +68,7 @@ export async function updateSettings(userId: string, orgId: string, input: Updat
   if (input.tone               !== undefined) configPatch.tone                 = input.tone;
   if (input.autoApproveReplies !== undefined) configPatch.auto_approve_replies = input.autoApproveReplies;
   if (input.dailyEmailSendCap  !== undefined) configPatch.daily_email_send_cap = input.dailyEmailSendCap;
+  if (input.bookingLink        !== undefined) configPatch.booking_link         = input.bookingLink;
 
   if (Object.keys(configPatch).length > 0) {
     const { error } = await supabase

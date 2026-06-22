@@ -162,8 +162,12 @@ export async function generateEmail(orgId: string, input: GenerateEmailInput) {
 
 // ── Reply generation ─────────────────────────────────────────────
 
-function buildReplySystemPrompt(agentConfig: any): string {
+function buildReplySystemPrompt(agentConfig: any, hasHistory: boolean): string {
   const toneInstruction = getToneInstruction(agentConfig.tone);
+
+  const historyNote = hasHistory
+    ? ''
+    : '\nNOTE: The original outreach emails are unavailable. Reply based on the prospect\'s message and your product knowledge.\n';
 
   return `You are ${agentConfig.agent_name}, an AI sales agent replying to a prospect's email.
 
@@ -173,7 +177,7 @@ ${agentConfig.objections ? `COMMON OBJECTIONS TO ADDRESS: ${agentConfig.objectio
 ${agentConfig.booking_link ? `BOOKING LINK: ${agentConfig.booking_link}` : ''}
 
 TONE: ${toneInstruction}
-
+${historyNote}
 RULES:
 - Reply naturally to what the prospect said.
 - If they asked a question, answer it directly.
@@ -186,11 +190,24 @@ Respond with JSON: { "body": "..." }
 The body should be plain text (no HTML). Use line breaks for paragraphs.`;
 }
 
-function buildReplyUserPrompt(thread: { outbound: any[]; reply: any }): string {
-  let prompt = 'CONVERSATION HISTORY:\n';
+function buildReplyUserPrompt(
+  thread: { outbound: any[]; reply: any },
+  lead: { first_name?: string; last_name?: string; title?: string; company?: string } | null,
+): string {
+  let prompt = '';
 
-  for (const msg of thread.outbound) {
-    prompt += `\n--- OUR EMAIL ---\nSubject: ${msg.subject}\n${msg.body}\n`;
+  if (lead) {
+    prompt += `PROSPECT:
+- Name: ${lead.first_name || ''} ${lead.last_name || ''}
+- Title: ${lead.title || 'Unknown'}
+- Company: ${lead.company || 'Unknown'}\n\n`;
+  }
+
+  if (thread.outbound.length > 0) {
+    prompt += 'CONVERSATION HISTORY:\n';
+    for (const msg of thread.outbound) {
+      prompt += `\n--- OUR EMAIL ---\nSubject: ${msg.subject}\n${msg.body}\n`;
+    }
   }
 
   prompt += `\n--- PROSPECT'S REPLY ---\n${thread.reply.body}\n`;
@@ -217,20 +234,37 @@ export async function generateReply(orgId: string, input: GenerateReplyInput) {
 
   if (!agentConfig) throw new AppError(404, 'Agent config not found');
 
-  const { data: threadMessages } = await supabase
-    .from('email_messages')
-    .select('subject, body, created_at')
-    .eq('lead_id', emailReply.lead_id)
-    .eq('campaign_id', emailReply.email_messages.campaign_id)
-    .order('created_at', { ascending: true });
+  const { data: lead } = await supabase
+    .from('leads')
+    .select('first_name, last_name, title, company')
+    .eq('id', emailReply.lead_id)
+    .single();
 
-  const thread = {
-    outbound: threadMessages || [],
-    reply: emailReply,
-  };
+  let outbound: any[] = [];
+  const campaignId = emailReply.email_messages?.campaign_id;
 
-  const systemPrompt = buildReplySystemPrompt(agentConfig);
-  const userPrompt = buildReplyUserPrompt(thread);
+  if (campaignId) {
+    const { data: threadMessages } = await supabase
+      .from('email_messages')
+      .select('subject, body, created_at')
+      .eq('lead_id', emailReply.lead_id)
+      .eq('campaign_id', campaignId)
+      .order('created_at', { ascending: true });
+    outbound = threadMessages || [];
+  }
+
+  if (outbound.length === 0 && emailReply.email_messages) {
+    outbound = [{
+      subject: emailReply.email_messages.subject,
+      body: emailReply.email_messages.body,
+    }];
+  }
+
+  const thread = { outbound, reply: emailReply };
+  const hasHistory = outbound.length > 0;
+
+  const systemPrompt = buildReplySystemPrompt(agentConfig, hasHistory);
+  const userPrompt = buildReplyUserPrompt(thread, lead);
 
   const raw = await withRetry(async () => {
     const timeout = createTimeout();
