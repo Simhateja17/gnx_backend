@@ -31,7 +31,7 @@ VALUES (
   '11111111-1111-1111-1111-111111111111',
   'Nexo',
   'Globonexo is an AI-powered outbound sales platform that automates lead prospecting, email sequences, and voice calls to book meetings.',
-  'We help B2B sales teams book 3x more meetings with zero manual prospecting. Our AI agent finds leads, writes personalized emails, and makes calls — all on autopilot.',
+  'We help B2B sales teams book 3x more meetings with zero manual prospecting. Our AI agent finds leads, writes personalized emails, and makes calls - all on autopilot.',
   'Price concerns: we save 40+ hours/month per rep. Already have an SDR team: Globonexo augments, not replaces. Data quality: we use Apollo.io for verified contacts.',
   'consultative',
   ARRAY['VP of Sales', 'Head of Growth', 'SDR Manager', 'Revenue Operations'],
@@ -102,9 +102,9 @@ VALUES (
   'Quick question about DataFlow''s outbound pipeline',
   'Hi Sarah,
 
-I noticed DataFlow Analytics has been growing quickly — congrats on the Series B. With that kind of growth, I imagine scaling outbound is top of mind for your sales team.
+I noticed DataFlow Analytics has been growing quickly - congrats on the Series B. With that kind of growth, I imagine scaling outbound is top of mind for your sales team.
 
-We built Globonexo to solve exactly that. Our AI agent handles lead sourcing, personalized email sequences, and even voice calls — so your reps can focus on closing instead of prospecting.
+We built Globonexo to solve exactly that. Our AI agent handles lead sourcing, personalized email sequences, and even voice calls - so your reps can focus on closing instead of prospecting.
 
 One of our customers, TechCorp, went from 5 to 18 meetings per month after switching. Would it make sense to chat for 15 minutes about whether we could do something similar for DataFlow?
 

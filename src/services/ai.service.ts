@@ -36,14 +36,20 @@ function getToneInstruction(tone: string): string {
 
 function sanitizeText(text: string): string {
   return text
-    .replace(/—/g, '-')   // em dash
-    .replace(/–/g, '-')   // en dash
-    .replace(/‘/g, "'")   // left single curly quote
-    .replace(/’/g, "'")   // right single curly quote
-    .replace(/“/g, '"')   // left double curly quote
-    .replace(/”/g, '"')   // right double curly quote
-    .replace(/…/g, '...') // ellipsis
-    .replace(/•/g, '-');  // bullet
+    .replace(/—/g, '-')
+    .replace(/–/g, '-')
+    .replace(/‘/g, "'")
+    .replace(/’/g, "'")
+    .replace(/“/g, '"')
+    .replace(/”/g, '"')
+    .replace(/…/g, '...')
+    .replace(/•/g, '-')
+    .replace(/ /g, ' ')
+    .replace(/﻿/g, '')
+    .replace(/​/g, '')
+    .replace(/‍/g, '')
+    .replace(/‌/g, '')
+    .replace(/­/g, '');
 }
 
 function sanitizeDeep(obj: unknown): unknown {
@@ -68,8 +74,9 @@ function extractJson(raw: string): string {
 function parseJsonSafe<T>(raw: string, schema: z.ZodType<T>, label: string): T {
   let json: unknown;
   try {
-    json = JSON.parse(sanitizeText(extractJson(raw)));
-  } catch {
+    json = JSON.parse(extractJson(raw));
+  } catch (e) {
+    console.error(`[ai] Failed to parse ${label} JSON. Raw response:`, raw);
     throw new AppError(502, `AI returned malformed JSON for ${label}`);
   }
 
@@ -165,8 +172,8 @@ export async function generateEmail(orgId: string, input: GenerateEmailInput) {
     previousEmails = data || [];
   }
 
-  const systemPrompt = buildEmailSystemPrompt(agentConfig, campaign, agentConfig.tone, input.stepNumber);
-  const userPrompt = buildEmailUserPrompt(lead, input.stepNumber, previousEmails);
+  const systemPrompt = sanitizeText(buildEmailSystemPrompt(agentConfig, campaign, agentConfig.tone, input.stepNumber));
+  const userPrompt = sanitizeText(buildEmailUserPrompt(lead, input.stepNumber, previousEmails));
 
   const raw = await withRetry(async () => {
     const timeout = createTimeout();
@@ -296,8 +303,8 @@ export async function generateReply(orgId: string, input: GenerateReplyInput) {
   const thread = { outbound, reply: emailReply };
   const hasHistory = outbound.length > 0;
 
-  const systemPrompt = buildReplySystemPrompt(agentConfig, hasHistory);
-  const userPrompt = buildReplyUserPrompt(thread, lead);
+  const systemPrompt = sanitizeText(buildReplySystemPrompt(agentConfig, hasHistory));
+  const userPrompt = sanitizeText(buildReplyUserPrompt(thread, lead));
 
   const raw = await withRetry(async () => {
     const timeout = createTimeout();
