@@ -102,6 +102,7 @@ function toLeadRecord(orgId: string, input: LeadCreateInput, rawData?: Record<st
     organization_id: orgId,
     campaign_id: input.campaignId ?? null,
     source: input.source,
+    apollo_id: clean(input.apolloId),
     first_name: firstName,
     last_name: lastName,
     name,
@@ -187,7 +188,7 @@ export async function searchApollo(input: ApolloSearchInput) {
 
   if (!response.ok) {
     const details = await response.text();
-    throw new AppError(response.status, 'Apollo search failed', details.slice(0, 1000));
+    throw new AppError(502, `Apollo search failed (${response.status})`, details.slice(0, 1000));
   }
 
   const data = await response.json() as {

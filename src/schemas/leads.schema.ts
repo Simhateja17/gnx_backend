@@ -4,6 +4,7 @@ const optionalText = z.string().trim().max(240).optional().or(z.literal(''));
 
 export const leadCreateSchema = z.object({
   campaignId: z.string().uuid().optional(),
+  apolloId: optionalText,
   firstName: optionalText,
   lastName: optionalText,
   name: z.string().trim().min(1).max(240).optional(),
