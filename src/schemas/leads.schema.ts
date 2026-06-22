@@ -33,6 +33,11 @@ export const csvUploadSchema = z.object({
   })).min(1).max(1000),
 });
 
+export const apolloEnrichSchema = z.object({
+  leadId: z.string().uuid(),
+});
+
 export type LeadCreateInput = z.infer<typeof leadCreateSchema>;
 export type ApolloSearchInput = z.infer<typeof apolloSearchSchema>;
 export type CsvUploadInput = z.infer<typeof csvUploadSchema>;
+export type ApolloEnrichInput = z.infer<typeof apolloEnrichSchema>;
