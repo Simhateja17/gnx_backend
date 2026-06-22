@@ -11,6 +11,7 @@ const envSchema = z.object({
 
   JWT_SECRET: z.string(),
   COOKIE_SECRET: z.string(),
+  COOKIE_DOMAIN: z.string().optional(),
 
   GOOGLE_CLIENT_ID: z.string(),
   GOOGLE_CLIENT_SECRET: z.string(),
@@ -18,7 +19,8 @@ const envSchema = z.object({
 
   AZURE_OPENAI_ENDPOINT: z.string().url(),
   AZURE_OPENAI_API_KEY: z.string(),
-  AZURE_OPENAI_DEPLOYMENT_NAME: z.string().default('gpt-4o'),
+  AZURE_OPENAI_API_VERSION: z.string().default('2025-04-01-preview'),
+  AZURE_OPENAI_CHAT_DEPLOYMENT: z.string().default('gpt-5.4-mini'),
 
   RETELL_API_KEY: z.string(),
   RETELL_WEBHOOK_SECRET: z.string(),
