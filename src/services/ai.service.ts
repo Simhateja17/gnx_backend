@@ -1,5 +1,6 @@
 import { openai } from '../lib/openai';
 import { supabase } from '../lib/supabase';
+import { env } from '../config/env';
 import { AppError } from '../types';
 import { withRetry } from '../lib/retry';
 import { GenerateEmailInput, GenerateReplyInput, GenerateVoicePromptInput } from '../schemas/ai.schema';
@@ -33,15 +34,47 @@ function getToneInstruction(tone: string): string {
   return TONE_DESCRIPTIONS[tone] || TONE_DESCRIPTIONS.consultative;
 }
 
+function sanitizeText(text: string): string {
+  return text
+    .replace(/—/g, '-')   // em dash
+    .replace(/–/g, '-')   // en dash
+    .replace(/‘/g, "'")   // left single curly quote
+    .replace(/’/g, "'")   // right single curly quote
+    .replace(/“/g, '"')   // left double curly quote
+    .replace(/”/g, '"')   // right double curly quote
+    .replace(/…/g, '...') // ellipsis
+    .replace(/•/g, '-');  // bullet
+}
+
+function sanitizeDeep(obj: unknown): unknown {
+  if (typeof obj === 'string') return sanitizeText(obj);
+  if (Array.isArray(obj)) return obj.map(sanitizeDeep);
+  if (obj && typeof obj === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) result[k] = sanitizeDeep(v);
+    return result;
+  }
+  return obj;
+}
+
+function extractJson(raw: string): string {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) return fenced[1].trim();
+  const braced = raw.match(/\{[\s\S]*\}/);
+  if (braced) return braced[0];
+  return raw.trim();
+}
+
 function parseJsonSafe<T>(raw: string, schema: z.ZodType<T>, label: string): T {
   let json: unknown;
   try {
-    json = JSON.parse(raw);
+    json = JSON.parse(sanitizeText(extractJson(raw)));
   } catch {
     throw new AppError(502, `AI returned malformed JSON for ${label}`);
   }
 
-  const result = schema.safeParse(json);
+  const sanitized = sanitizeDeep(json);
+  const result = schema.safeParse(sanitized);
   if (!result.success) {
     throw new AppError(502, `AI returned invalid ${label} format`);
   }
@@ -139,7 +172,7 @@ export async function generateEmail(orgId: string, input: GenerateEmailInput) {
     const timeout = createTimeout();
     try {
       const completion = await openai.chat.completions.create({
-        model: '',
+        model: env.AZURE_OPENAI_CHAT_DEPLOYMENT,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
@@ -270,7 +303,7 @@ export async function generateReply(orgId: string, input: GenerateReplyInput) {
     const timeout = createTimeout();
     try {
       const completion = await openai.chat.completions.create({
-        model: '',
+        model: env.AZURE_OPENAI_CHAT_DEPLOYMENT,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
@@ -308,7 +341,7 @@ export async function generateVoicePrompt(orgId: string, input: GenerateVoicePro
 
   const prompt = `You are ${agentConfig.agent_name}, an AI sales agent making outbound phone calls.
 
-COMPLIANCE — YOU MUST FOLLOW THESE RULES:
+COMPLIANCE - YOU MUST FOLLOW THESE RULES:
 1. At the very start of every call, disclose that you are an AI assistant: "Hi, this is ${agentConfig.agent_name}, an AI assistant calling on behalf of [company]. Before we continue, I want to let you know this call is powered by AI."
 2. Before recording, you MUST ask for verbal consent: "Do you mind if I record this call for quality purposes?"
 3. If the prospect says no to recording, continue the call without recording.
@@ -332,12 +365,12 @@ CALL STRUCTURE:
 7. If not interested, thank them for their time and end politely.
 
 VARIABLES AVAILABLE AT CALL TIME:
-- {{lead_name}} — prospect's full name
-- {{lead_title}} — prospect's job title
-- {{lead_company}} — prospect's company name
-- {{lead_email}} — prospect's email address
+- {{lead_name}} - prospect's full name
+- {{lead_title}} - prospect's job title
+- {{lead_company}} - prospect's company name
+- {{lead_email}} - prospect's email address
 
 Keep responses concise and conversational. Do not monologue.`;
 
-  return { prompt };
+  return { prompt: sanitizeText(prompt) };
 }
