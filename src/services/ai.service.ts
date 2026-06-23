@@ -1,5 +1,6 @@
 import { openai } from '../lib/openai';
 import { supabase } from '../lib/supabase';
+import { env } from '../config/env';
 import { AppError } from '../types';
 import { withRetry } from '../lib/retry';
 import { GenerateEmailInput, GenerateReplyInput, GenerateVoicePromptInput } from '../schemas/ai.schema';
@@ -33,15 +34,54 @@ function getToneInstruction(tone: string): string {
   return TONE_DESCRIPTIONS[tone] || TONE_DESCRIPTIONS.consultative;
 }
 
+function sanitizeText(text: string): string {
+  return text
+    .replace(/—/g, '-')
+    .replace(/–/g, '-')
+    .replace(/‘/g, "'")
+    .replace(/’/g, "'")
+    .replace(/“/g, '"')
+    .replace(/”/g, '"')
+    .replace(/…/g, '...')
+    .replace(/•/g, '-')
+    .replace(/ /g, ' ')
+    .replace(/﻿/g, '')
+    .replace(/​/g, '')
+    .replace(/‍/g, '')
+    .replace(/‌/g, '')
+    .replace(/­/g, '');
+}
+
+function sanitizeDeep(obj: unknown): unknown {
+  if (typeof obj === 'string') return sanitizeText(obj);
+  if (Array.isArray(obj)) return obj.map(sanitizeDeep);
+  if (obj && typeof obj === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) result[k] = sanitizeDeep(v);
+    return result;
+  }
+  return obj;
+}
+
+function extractJson(raw: string): string {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) return fenced[1].trim();
+  const braced = raw.match(/\{[\s\S]*\}/);
+  if (braced) return braced[0];
+  return raw.trim();
+}
+
 function parseJsonSafe<T>(raw: string, schema: z.ZodType<T>, label: string): T {
   let json: unknown;
   try {
-    json = JSON.parse(raw);
-  } catch {
+    json = JSON.parse(extractJson(raw));
+  } catch (e) {
+    console.error(`[ai] Failed to parse ${label} JSON. Raw response:`, raw);
     throw new AppError(502, `AI returned malformed JSON for ${label}`);
   }
 
-  const result = schema.safeParse(json);
+  const sanitized = sanitizeDeep(json);
+  const result = schema.safeParse(sanitized);
   if (!result.success) {
     throw new AppError(502, `AI returned invalid ${label} format`);
   }
@@ -61,6 +101,7 @@ function buildEmailSystemPrompt(
   campaign: any,
   tone: string,
   stepNumber: number,
+  stepContext?: string | null,
 ): string {
   const toneInstruction = getToneInstruction(tone);
 
@@ -80,9 +121,12 @@ TONE: ${toneInstruction}`;
     3: `Write a final breakup email. Be brief (under 80 words), acknowledge you don't want to be a nuisance, and give one last reason to connect.${agentConfig.booking_link ? ' Include the booking link as a final CTA.' : ''} Make it easy for them to say "not now" without burning the bridge.`,
   };
 
+  const task = stepInstructions[stepNumber] || stepInstructions[1];
+  const customContext = stepContext ? `\nADDITIONAL INSTRUCTIONS FOR THIS STEP: ${stepContext}` : '';
+
   return `${baseContext}
 
-TASK: ${stepInstructions[stepNumber] || stepInstructions[1]}
+TASK: ${task}${customContext}
 
 Respond with JSON: { "subject": "...", "body": "..." }
 The body should be plain text (no HTML). Use line breaks for paragraphs.`;
@@ -121,25 +165,34 @@ export async function generateEmail(orgId: string, input: GenerateEmailInput) {
   const campaign = campaignResult.data;
   const lead = leadResult.data;
 
-  let previousEmails: any[] = [];
-  if (input.stepNumber > 1) {
-    const { data } = await supabase
-      .from('email_messages')
-      .select('subject, body, created_at')
+  const [previousEmailsResult, sequenceStepResult] = await Promise.all([
+    input.stepNumber > 1
+      ? supabase
+          .from('email_messages')
+          .select('subject, body, created_at')
+          .eq('campaign_id', input.campaignId)
+          .eq('lead_id', input.leadId)
+          .order('created_at', { ascending: true })
+      : Promise.resolve({ data: [] }),
+    supabase
+      .from('email_sequence_steps')
+      .select('body_prompt_context')
       .eq('campaign_id', input.campaignId)
-      .eq('lead_id', input.leadId)
-      .order('created_at', { ascending: true });
-    previousEmails = data || [];
-  }
+      .eq('step_number', input.stepNumber)
+      .maybeSingle(),
+  ]);
 
-  const systemPrompt = buildEmailSystemPrompt(agentConfig, campaign, agentConfig.tone, input.stepNumber);
-  const userPrompt = buildEmailUserPrompt(lead, input.stepNumber, previousEmails);
+  const previousEmails = previousEmailsResult.data || [];
+  const stepContext = sequenceStepResult.data?.body_prompt_context || null;
+
+  const systemPrompt = sanitizeText(buildEmailSystemPrompt(agentConfig, campaign, agentConfig.tone, input.stepNumber, stepContext));
+  const userPrompt = sanitizeText(buildEmailUserPrompt(lead, input.stepNumber, previousEmails));
 
   const raw = await withRetry(async () => {
     const timeout = createTimeout();
     try {
       const completion = await openai.chat.completions.create({
-        model: '',
+        model: env.AZURE_OPENAI_CHAT_DEPLOYMENT,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
@@ -263,14 +316,14 @@ export async function generateReply(orgId: string, input: GenerateReplyInput) {
   const thread = { outbound, reply: emailReply };
   const hasHistory = outbound.length > 0;
 
-  const systemPrompt = buildReplySystemPrompt(agentConfig, hasHistory);
-  const userPrompt = buildReplyUserPrompt(thread, lead);
+  const systemPrompt = sanitizeText(buildReplySystemPrompt(agentConfig, hasHistory));
+  const userPrompt = sanitizeText(buildReplyUserPrompt(thread, lead));
 
   const raw = await withRetry(async () => {
     const timeout = createTimeout();
     try {
       const completion = await openai.chat.completions.create({
-        model: '',
+        model: env.AZURE_OPENAI_CHAT_DEPLOYMENT,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
@@ -308,7 +361,7 @@ export async function generateVoicePrompt(orgId: string, input: GenerateVoicePro
 
   const prompt = `You are ${agentConfig.agent_name}, an AI sales agent making outbound phone calls.
 
-COMPLIANCE — YOU MUST FOLLOW THESE RULES:
+COMPLIANCE - YOU MUST FOLLOW THESE RULES:
 1. At the very start of every call, disclose that you are an AI assistant: "Hi, this is ${agentConfig.agent_name}, an AI assistant calling on behalf of [company]. Before we continue, I want to let you know this call is powered by AI."
 2. Before recording, you MUST ask for verbal consent: "Do you mind if I record this call for quality purposes?"
 3. If the prospect says no to recording, continue the call without recording.
@@ -332,12 +385,12 @@ CALL STRUCTURE:
 7. If not interested, thank them for their time and end politely.
 
 VARIABLES AVAILABLE AT CALL TIME:
-- {{lead_name}} — prospect's full name
-- {{lead_title}} — prospect's job title
-- {{lead_company}} — prospect's company name
-- {{lead_email}} — prospect's email address
+- {{lead_name}} - prospect's full name
+- {{lead_title}} - prospect's job title
+- {{lead_company}} - prospect's company name
+- {{lead_email}} - prospect's email address
 
 Keep responses concise and conversational. Do not monologue.`;
 
-  return { prompt };
+  return { prompt: sanitizeText(prompt) };
 }

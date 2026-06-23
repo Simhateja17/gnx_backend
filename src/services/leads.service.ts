@@ -191,7 +191,7 @@ export async function searchApollo(input: ApolloSearchInput) {
 
   if (!response.ok) {
     const details = await response.text();
-    throw new AppError(response.status, 'Apollo search failed', details.slice(0, 1000));
+    throw new AppError(502, `Apollo search failed (${response.status})`, details.slice(0, 1000));
   }
 
   const data = await response.json() as {

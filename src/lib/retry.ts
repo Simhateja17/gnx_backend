@@ -14,8 +14,10 @@ export async function withRetry<T>(
   { maxAttempts = 3, label = 'operation' } = {},
 ): Promise<T> {
   let lastError: any;
+  let attempts = 0;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    attempts = attempt;
     try {
       return await fn();
     } catch (err: any) {
@@ -33,6 +35,6 @@ export async function withRetry<T>(
 
   throw new AppError(
     502,
-    `AI service unavailable after ${maxAttempts} attempts: ${lastError?.message ?? 'unknown error'}`,
+    `AI service unavailable after ${attempts} attempt${attempts > 1 ? 's' : ''}: ${lastError?.message ?? 'unknown error'}`,
   );
 }

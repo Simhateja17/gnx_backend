@@ -31,7 +31,7 @@ VALUES (
   '11111111-1111-1111-1111-111111111111',
   'Nexo',
   'Globonexo is an AI-powered outbound sales platform that automates lead prospecting, email sequences, and voice calls to book meetings.',
-  'We help B2B sales teams book 3x more meetings with zero manual prospecting. Our AI agent finds leads, writes personalized emails, and makes calls — all on autopilot.',
+  'We help B2B sales teams book 3x more meetings with zero manual prospecting. Our AI agent finds leads, writes personalized emails, and makes calls - all on autopilot.',
   'Price concerns: we save 40+ hours/month per rep. Already have an SDR team: Globonexo augments, not replaces. Data quality: we use Apollo.io for verified contacts.',
   'consultative',
   ARRAY['VP of Sales', 'Head of Growth', 'SDR Manager', 'Revenue Operations'],
@@ -54,6 +54,14 @@ VALUES (
   100,
   'America/New_York'
 ) ON CONFLICT (id) DO NOTHING;
+
+-- 4b. Sequence steps for email campaign (optional custom context per step)
+INSERT INTO email_sequence_steps (id, campaign_id, step_number, delay_days, body_prompt_context)
+VALUES
+  ('44440001-0001-0001-0001-000000000001', '44444444-4444-4444-4444-444444444444', 1, 0, NULL),
+  ('44440001-0001-0001-0001-000000000002', '44444444-4444-4444-4444-444444444444', 2, 3, 'Mention our recent case study with TechCorp who went from 5 to 18 meetings per month. Focus on the ROI angle.'),
+  ('44440001-0001-0001-0001-000000000003', '44444444-4444-4444-4444-444444444444', 3, 7, 'Offer a free 14-day trial as a final incentive before closing the loop.')
+ON CONFLICT (id) DO NOTHING;
 
 -- 5. Test voice campaign
 INSERT INTO campaigns (id, organization_id, name, channel, status, agent_config_id, prompt_context, max_leads, call_cadence_per_hour, voice_mode, timezone)
@@ -102,9 +110,9 @@ VALUES (
   'Quick question about DataFlow''s outbound pipeline',
   'Hi Sarah,
 
-I noticed DataFlow Analytics has been growing quickly — congrats on the Series B. With that kind of growth, I imagine scaling outbound is top of mind for your sales team.
+I noticed DataFlow Analytics has been growing quickly - congrats on the Series B. With that kind of growth, I imagine scaling outbound is top of mind for your sales team.
 
-We built Globonexo to solve exactly that. Our AI agent handles lead sourcing, personalized email sequences, and even voice calls — so your reps can focus on closing instead of prospecting.
+We built Globonexo to solve exactly that. Our AI agent handles lead sourcing, personalized email sequences, and even voice calls - so your reps can focus on closing instead of prospecting.
 
 One of our customers, TechCorp, went from 5 to 18 meetings per month after switching. Would it make sense to chat for 15 minutes about whether we could do something similar for DataFlow?
 
