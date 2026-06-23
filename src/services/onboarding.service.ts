@@ -11,14 +11,26 @@ export async function submitOnboarding(orgId: string, data: Partial<OnboardingIn
 
   const record = {
     agent_name: data.agentName ?? 'Nexo',
+    first_name: data.firstName ?? '',
+    last_name: data.lastName ?? '',
+    company: data.company ?? '',
+    role: data.role ?? '',
+    industry: data.industry ?? '',
     product_description: data.productDescription ?? '',
     value_proposition: data.valueProp ?? '',
-    objections: data.objections ?? null,
+    pain_points: data.painPoints ?? null,
     tone: data.tone ?? 'consultative',
+    hook_style: data.hookStyle ?? '',
+    follow_up_cadence: data.followUpCadence ?? '',
     icp_titles: data.icpTitles ?? [],
     icp_company_sizes: data.icpCompanySizes ?? [],
+    icp_target_industries: data.icpTargetIndustries ?? [],
     icp_geos: data.icpGeos ?? [],
+    meeting_target: data.meetingTarget ?? 15,
+    deal_size: data.dealSize ?? '',
+    sales_cycle: data.salesCycle ?? '',
     booking_link: data.bookingLink || null,
+    tools: data.tools ?? [],
     updated_at: new Date().toISOString(),
   };
 

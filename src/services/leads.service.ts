@@ -1,7 +1,10 @@
 import { env } from '../config/env';
 import { supabase } from '../lib/supabase';
+import { redis } from '../lib/redis';
 import { AppError } from '../types';
+import { mapRow } from '../lib/csv-parser';
 import type { ApolloEnrichInput, ApolloSearchInput, CsvUploadInput, LeadCreateInput } from '../schemas/leads.schema';
+import type { CsvImportJobData, CsvImportProgress } from '../jobs/csv-import.job';
 
 type LeadRow = {
   id: string;
@@ -380,4 +383,95 @@ export async function listLeadsFiltered(orgId: string, filters: {
       total: count ?? 0,
     },
   };
+}
+
+const PROGRESS_TTL = 3600;
+
+function progressKey(jobId: string) {
+  return `csv-import:${jobId}:progress`;
+}
+
+export async function setCsvImportProgress(jobId: string, progress: CsvImportProgress) {
+  await redis.set(progressKey(jobId), JSON.stringify(progress), 'EX', PROGRESS_TTL);
+}
+
+export async function getCsvImportProgress(jobId: string): Promise<CsvImportProgress | null> {
+  const raw = await redis.get(progressKey(jobId));
+  if (!raw) return null;
+  return JSON.parse(raw);
+}
+
+const BATCH_SIZE = 50;
+
+export async function processCsvImportJob(jobId: string, data: CsvImportJobData) {
+  const { organizationId, campaignId, columnMapping, rows, totalRows, fileName } = data;
+
+  const progress: CsvImportProgress = {
+    status: 'processing',
+    total: totalRows,
+    processed: 0,
+    inserted: 0,
+    skipped: 0,
+    errors: [],
+    fileName,
+  };
+  await setCsvImportProgress(jobId, progress);
+
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE);
+    const records: ReturnType<typeof toLeadRecord>[] = [];
+
+    for (let j = 0; j < batch.length; j++) {
+      const rowIndex = i + j + 2;
+      const mapped = mapRow(batch[j], columnMapping);
+
+      if (!mapped.email && !mapped.name && !mapped.firstName && !mapped.lastName) {
+        progress.errors.push({ row: rowIndex, message: 'Row has no identifiable data (no email or name)' });
+        progress.skipped++;
+        progress.processed++;
+        continue;
+      }
+
+      records.push(toLeadRecord(organizationId, {
+        campaignId: campaignId,
+        source: 'csv',
+        firstName: mapped.firstName,
+        lastName: mapped.lastName,
+        name: mapped.name,
+        title: mapped.title,
+        company: mapped.company,
+        email: mapped.email,
+        phone: mapped.phone,
+        location: mapped.location,
+        linkedinUrl: mapped.linkedinUrl,
+      }, batch[j] as unknown as Record<string, unknown>));
+    }
+
+    if (records.length > 0) {
+      const { data: inserted, error } = await supabase
+        .from('leads')
+        .insert(records)
+        .select('id');
+
+      if (error) {
+        for (let j = 0; j < records.length; j++) {
+          progress.errors.push({
+            row: i + j + 2,
+            message: error.message || 'Database insert failed',
+          });
+        }
+        progress.skipped += records.length;
+      } else {
+        progress.inserted += inserted?.length ?? 0;
+      }
+    }
+
+    progress.processed = Math.min(i + batch.length, totalRows);
+    await setCsvImportProgress(jobId, progress);
+  }
+
+  progress.status = 'completed';
+  progress.processed = totalRows;
+  await setCsvImportProgress(jobId, progress);
+  return progress;
 }
