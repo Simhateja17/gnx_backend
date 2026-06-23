@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import { Worker } from 'bullmq';
 import { redisConnection } from '../lib/redis';
+import { supabase } from '../lib/supabase';
+import { enqueueRecurringPollInbox } from '../jobs/poll-inbox.job';
 import { sendEmail, checkSendCap } from '../services/email.service';
 import { pollInbox } from '../services/gmail.service';
 import { scheduleCall } from '../services/voice.service';
@@ -80,5 +82,28 @@ enrichLeadsWorker.on('failed', (job, err) => console.error(`[enrich-leads] Job $
 csvImportWorker.on('failed', (job, err) => console.error(`[csv-import] Job ${job?.id} failed:`, err.message));
 
 console.log('Workers started: send-email, poll-inbox, schedule-call, enrich-leads, csv-import');
+
+async function scheduleRecurringInboxPolls() {
+  const { data, error } = await supabase
+    .from('connected_accounts')
+    .select('id,organization_id')
+    .eq('provider', 'gmail');
+
+  if (error) {
+    console.error('[poll-inbox] Failed to schedule recurring poll jobs:', error.message);
+    return;
+  }
+
+  for (const account of data ?? []) {
+    await enqueueRecurringPollInbox({
+      organizationId: account.organization_id,
+      connectedAccountId: account.id,
+    });
+  }
+
+  console.log(`[poll-inbox] Scheduled recurring poll jobs for ${data?.length ?? 0} Gmail accounts`);
+}
+
+void scheduleRecurringInboxPolls();
 
 export { sendEmailWorker, pollInboxWorker, scheduleCallWorker, enrichLeadsWorker, csvImportWorker };
