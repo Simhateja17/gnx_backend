@@ -1,14 +1,17 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
 import { validate } from '../middleware/validate.middleware';
-import { campaignCreateSchema, campaignUpdateSchema } from '../schemas/campaigns.schema';
+import { assignLeadsSchema, campaignCreateSchema, campaignUpdateSchema, sequenceStepsUpsertSchema } from '../schemas/campaigns.schema';
 import {
+  assignLeadsToCampaign,
   createCampaign,
   deleteCampaign,
   getCampaign,
+  getSequenceSteps,
   listCampaigns,
   setCampaignStatus,
   updateCampaign,
+  upsertSequenceSteps,
 } from '../services/campaigns.service';
 import { AppError } from '../types';
 
@@ -65,6 +68,30 @@ router.post('/:id/launch', async (req: AuthenticatedRequest, res: Response, next
 router.post('/:id/pause', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     res.json(await setCampaignStatus(getOrgId(req), req.params.id, 'paused'));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/:id/steps', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await getSequenceSteps(getOrgId(req), req.params.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put('/:id/steps', validate(sequenceStepsUpsertSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await upsertSequenceSteps(getOrgId(req), req.params.id, req.body));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/:id/assign-leads', validate(assignLeadsSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await assignLeadsToCampaign(getOrgId(req), req.params.id, req.body));
   } catch (err) {
     next(err);
   }

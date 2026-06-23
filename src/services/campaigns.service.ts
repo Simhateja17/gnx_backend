@@ -1,6 +1,6 @@
 import { supabase } from '../lib/supabase';
 import { AppError } from '../types';
-import type { CampaignCreateInput, CampaignUpdateInput } from '../schemas/campaigns.schema';
+import type { AssignLeadsInput, CampaignCreateInput, CampaignUpdateInput, SequenceStepsUpsertInput } from '../schemas/campaigns.schema';
 
 type CampaignRow = {
   id: string;
@@ -289,4 +289,77 @@ export async function deleteCampaign(orgId: string, id: string) {
   if (error) throw new AppError(500, 'Failed to delete campaign', error);
   if (!data) throw new AppError(404, 'Campaign not found');
   return { success: true };
+}
+
+export async function getSequenceSteps(orgId: string, campaignId: string) {
+  await getCampaign(orgId, campaignId);
+
+  const { data, error } = await supabase
+    .from('email_sequence_steps')
+    .select('id,campaign_id,step_number,delay_days,subject_template,body_prompt_context')
+    .eq('campaign_id', campaignId)
+    .order('step_number', { ascending: true });
+
+  if (error) throw new AppError(500, 'Failed to fetch sequence steps', error);
+
+  return {
+    items: (data ?? []).map(row => ({
+      id: row.id,
+      stepNumber: row.step_number,
+      delayDays: row.delay_days,
+      subjectTemplate: row.subject_template,
+      bodyPromptContext: row.body_prompt_context,
+    })),
+  };
+}
+
+export async function upsertSequenceSteps(orgId: string, campaignId: string, input: SequenceStepsUpsertInput) {
+  await getCampaign(orgId, campaignId);
+
+  const { error: deleteError } = await supabase
+    .from('email_sequence_steps')
+    .delete()
+    .eq('campaign_id', campaignId);
+
+  if (deleteError) throw new AppError(500, 'Failed to clear existing steps', deleteError);
+
+  const records = input.steps.map(step => ({
+    campaign_id: campaignId,
+    step_number: step.stepNumber,
+    delay_days: step.delayDays,
+    subject_template: step.subjectTemplate,
+    body_prompt_context: step.bodyPromptContext,
+  }));
+
+  const { data, error } = await supabase
+    .from('email_sequence_steps')
+    .insert(records)
+    .select('id,campaign_id,step_number,delay_days,subject_template,body_prompt_context');
+
+  if (error) throw new AppError(500, 'Failed to save sequence steps', error);
+
+  return {
+    items: (data ?? []).map(row => ({
+      id: row.id,
+      stepNumber: row.step_number,
+      delayDays: row.delay_days,
+      subjectTemplate: row.subject_template,
+      bodyPromptContext: row.body_prompt_context,
+    })),
+  };
+}
+
+export async function assignLeadsToCampaign(orgId: string, campaignId: string, input: AssignLeadsInput) {
+  await getCampaign(orgId, campaignId);
+
+  const { data, error } = await supabase
+    .from('leads')
+    .update({ campaign_id: campaignId, updated_at: new Date().toISOString() })
+    .eq('organization_id', orgId)
+    .in('id', input.leadIds)
+    .select('id');
+
+  if (error) throw new AppError(500, 'Failed to assign leads', error);
+
+  return { assigned: data?.length ?? 0 };
 }
