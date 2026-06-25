@@ -1,7 +1,10 @@
 import { env } from '../config/env';
 import { supabase } from '../lib/supabase';
+import { redis } from '../lib/redis';
 import { AppError } from '../types';
-import type { ApolloSearchInput, CsvUploadInput, LeadCreateInput } from '../schemas/leads.schema';
+import { mapRow } from '../lib/csv-parser';
+import type { ApolloEnrichInput, ApolloSearchInput, CsvUploadInput, LeadCreateInput } from '../schemas/leads.schema';
+import type { CsvImportJobData, CsvImportProgress } from '../jobs/csv-import.job';
 
 type LeadRow = {
   id: string;
@@ -252,4 +255,223 @@ export async function deleteLead(orgId: string, id: string) {
   if (error) throw new AppError(500, 'Failed to delete lead', error);
   if (!data) throw new AppError(404, 'Lead not found');
   return { success: true };
+}
+
+export async function enrichLead(orgId: string, input: ApolloEnrichInput) {
+  const { data: lead, error: fetchError } = await supabase
+    .from('leads')
+    .select(LEAD_COLUMNS)
+    .eq('organization_id', orgId)
+    .eq('id', input.leadId)
+    .single();
+
+  if (fetchError || !lead) throw new AppError(404, 'Lead not found');
+
+  const row = lead as unknown as LeadRow;
+  const enrichBody: Record<string, unknown> = {};
+
+  if (row.apollo_id) {
+    enrichBody.id = row.apollo_id;
+  } else if (row.email) {
+    enrichBody.email = row.email;
+  } else {
+    const parts: Record<string, unknown> = {};
+    if (row.first_name) parts.first_name = row.first_name;
+    if (row.last_name) parts.last_name = row.last_name;
+    if (row.company) parts.organization_name = row.company;
+    if (Object.keys(parts).length === 0) {
+      throw new AppError(400, 'Lead has no identifiers for enrichment (need email, apollo_id, or name+company)');
+    }
+    Object.assign(enrichBody, parts);
+  }
+
+  const response = await fetch('https://api.apollo.io/api/v1/people/match', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-cache',
+      'x-api-key': env.APOLLO_API_KEY,
+    },
+    body: JSON.stringify(enrichBody),
+  });
+
+  if (!response.ok) {
+    const details = await response.text();
+    throw new AppError(502, `Apollo enrich failed (${response.status})`, details.slice(0, 1000));
+  }
+
+  const result = await response.json() as { person?: ApolloPerson };
+  const person = result.person;
+
+  if (!person) {
+    await supabase
+      .from('leads')
+      .update({ status: 'enrichment_failed', updated_at: new Date().toISOString() })
+      .eq('id', input.leadId)
+      .eq('organization_id', orgId);
+    throw new AppError(404, 'No enrichment data found for this lead');
+  }
+
+  const mapped = mapApolloPerson(person);
+  const updates: Record<string, unknown> = {
+    apollo_id: person.id ?? row.apollo_id,
+    first_name: mapped.firstName || row.first_name,
+    last_name: mapped.lastName || row.last_name,
+    name: mapped.name || row.name,
+    title: mapped.title || row.title,
+    company: mapped.company || row.company,
+    email: mapped.email || row.email,
+    phone: mapped.phone || row.phone,
+    location: mapped.location || row.location,
+    linkedin_url: mapped.linkedinUrl || row.linkedin_url,
+    raw_data: person,
+    status: 'new',
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data: updated, error: updateError } = await supabase
+    .from('leads')
+    .update(updates)
+    .eq('id', input.leadId)
+    .eq('organization_id', orgId)
+    .select(LEAD_COLUMNS)
+    .single();
+
+  if (updateError) throw new AppError(500, 'Failed to save enriched lead', updateError);
+  return toApiLead(updated as unknown as LeadRow);
+}
+
+export async function listLeadsFiltered(orgId: string, filters: {
+  search?: string;
+  status?: string;
+  source?: string;
+  page?: number;
+  perPage?: number;
+}) {
+  const page = filters.page ?? 1;
+  const perPage = filters.perPage ?? 50;
+  const from = (page - 1) * perPage;
+  const to = from + perPage - 1;
+
+  let query = supabase
+    .from('leads')
+    .select(LEAD_COLUMNS, { count: 'exact' })
+    .eq('organization_id', orgId);
+
+  if (filters.status) {
+    query = query.eq('status', filters.status);
+  }
+  if (filters.source) {
+    query = query.eq('source', filters.source);
+  }
+  if (filters.search) {
+    const term = `%${filters.search}%`;
+    query = query.or(`name.ilike.${term},email.ilike.${term},company.ilike.${term},first_name.ilike.${term},last_name.ilike.${term}`);
+  }
+
+  const { data, error, count } = await query
+    .order('created_at', { ascending: false })
+    .range(from, to);
+
+  if (error) throw new AppError(500, 'Failed to fetch leads', error);
+
+  return {
+    items: ((data ?? []) as unknown as LeadRow[]).map(toApiLead),
+    pagination: {
+      page,
+      perPage,
+      total: count ?? 0,
+    },
+  };
+}
+
+const PROGRESS_TTL = 3600;
+
+function progressKey(jobId: string) {
+  return `csv-import:${jobId}:progress`;
+}
+
+export async function setCsvImportProgress(jobId: string, progress: CsvImportProgress) {
+  await redis.set(progressKey(jobId), JSON.stringify(progress), 'EX', PROGRESS_TTL);
+}
+
+export async function getCsvImportProgress(jobId: string): Promise<CsvImportProgress | null> {
+  const raw = await redis.get(progressKey(jobId));
+  if (!raw) return null;
+  return JSON.parse(raw);
+}
+
+const BATCH_SIZE = 50;
+
+export async function processCsvImportJob(jobId: string, data: CsvImportJobData) {
+  const { organizationId, campaignId, columnMapping, rows, totalRows, fileName } = data;
+
+  const progress: CsvImportProgress = {
+    status: 'processing',
+    total: totalRows,
+    processed: 0,
+    inserted: 0,
+    skipped: 0,
+    errors: [],
+    fileName,
+  };
+  await setCsvImportProgress(jobId, progress);
+
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE);
+    const records: ReturnType<typeof toLeadRecord>[] = [];
+
+    for (let j = 0; j < batch.length; j++) {
+      const rowIndex = i + j + 2;
+      const mapped = mapRow(batch[j], columnMapping);
+
+      if (!mapped.email && !mapped.name && !mapped.firstName && !mapped.lastName) {
+        progress.errors.push({ row: rowIndex, message: 'Row has no identifiable data (no email or name)' });
+        progress.skipped++;
+        progress.processed++;
+        continue;
+      }
+
+      records.push(toLeadRecord(organizationId, {
+        campaignId: campaignId,
+        source: 'csv',
+        firstName: mapped.firstName,
+        lastName: mapped.lastName,
+        name: mapped.name,
+        title: mapped.title,
+        company: mapped.company,
+        email: mapped.email,
+        phone: mapped.phone,
+        location: mapped.location,
+        linkedinUrl: mapped.linkedinUrl,
+      }, batch[j] as unknown as Record<string, unknown>));
+    }
+
+    if (records.length > 0) {
+      const { data: inserted, error } = await supabase
+        .from('leads')
+        .insert(records)
+        .select('id');
+
+      if (error) {
+        for (let j = 0; j < records.length; j++) {
+          progress.errors.push({
+            row: i + j + 2,
+            message: error.message || 'Database insert failed',
+          });
+        }
+        progress.skipped += records.length;
+      } else {
+        progress.inserted += inserted?.length ?? 0;
+      }
+    }
+
+    progress.processed = Math.min(i + batch.length, totalRows);
+    await setCsvImportProgress(jobId, progress);
+  }
+
+  progress.status = 'completed';
+  progress.processed = totalRows;
+  await setCsvImportProgress(jobId, progress);
+  return progress;
 }

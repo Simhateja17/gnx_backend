@@ -25,5 +25,22 @@ export const campaignUpdateSchema = campaignCreateSchema.partial().refine(
   'At least one field is required'
 );
 
+export const sequenceStepSchema = z.object({
+  stepNumber: z.coerce.number().int().min(1).max(10),
+  delayDays: z.coerce.number().int().min(0).max(90),
+  subjectTemplate: z.string().trim().max(500).default(''),
+  bodyPromptContext: z.string().trim().max(4000).default(''),
+});
+
+export const sequenceStepsUpsertSchema = z.object({
+  steps: z.array(sequenceStepSchema).min(1).max(10),
+});
+
+export const assignLeadsSchema = z.object({
+  leadIds: z.array(z.string().uuid()).min(1).max(500),
+});
+
 export type CampaignCreateInput = z.infer<typeof campaignCreateSchema>;
 export type CampaignUpdateInput = z.infer<typeof campaignUpdateSchema>;
+export type SequenceStepsUpsertInput = z.infer<typeof sequenceStepsUpsertSchema>;
+export type AssignLeadsInput = z.infer<typeof assignLeadsSchema>;

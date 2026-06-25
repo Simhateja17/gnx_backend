@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase';
+import { enqueueSendEmail } from '../jobs/send-email.job';
 import { AppError } from '../types';
-import type { CampaignCreateInput, CampaignUpdateInput } from '../schemas/campaigns.schema';
+import type { AssignLeadsInput, CampaignCreateInput, CampaignUpdateInput, SequenceStepsUpsertInput } from '../schemas/campaigns.schema';
 
 type CampaignRow = {
   id: string;
@@ -274,7 +275,86 @@ export async function setCampaignStatus(
   if (error) throw new AppError(500, `Failed to set campaign ${status}`, error);
   if (!data) throw new AppError(404, 'Campaign not found');
   const stats = await getStatsByCampaign(orgId, [id]);
-  return toApiCampaign(data as unknown as CampaignRow, stats.get(id));
+  const campaign = toApiCampaign(data as unknown as CampaignRow, stats.get(id));
+
+  if (status === 'active' && campaign.channel === 'email') {
+    const queued = await enqueueInitialEmailStep(orgId, id);
+    return { ...campaign, queued };
+  }
+
+  return campaign;
+}
+
+async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
+  const { data: firstStep, error: stepError } = await supabase
+    .from('email_sequence_steps')
+    .select('id,step_number')
+    .eq('campaign_id', campaignId)
+    .eq('step_number', 1)
+    .maybeSingle();
+
+  if (stepError) throw new AppError(500, 'Failed to fetch first sequence step', stepError);
+
+  const { data: leads, error: leadsError } = await supabase
+    .from('leads')
+    .select('id,email,status')
+    .eq('organization_id', orgId)
+    .eq('campaign_id', campaignId)
+    .not('email', 'is', null);
+
+  if (leadsError) throw new AppError(500, 'Failed to fetch campaign leads', leadsError);
+
+  const eligibleLeads = (leads ?? []).filter(lead =>
+    lead.email &&
+    !['engaged', 'meeting_booked', 'not_interested', 'unsubscribed'].includes(lead.status)
+  );
+
+  let queued = 0;
+
+  for (const lead of eligibleLeads) {
+    const { data: existing, error: existingError } = await supabase
+      .from('email_messages')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('campaign_id', campaignId)
+      .eq('lead_id', lead.id)
+      .eq('step_number', 1)
+      .maybeSingle();
+
+    if (existingError) throw new AppError(500, 'Failed to check existing campaign email', existingError);
+    if (existing) continue;
+
+    const { data: message, error: messageError } = await supabase
+      .from('email_messages')
+      .insert({
+        organization_id: orgId,
+        campaign_id: campaignId,
+        lead_id: lead.id,
+        sequence_step_id: firstStep?.id ?? null,
+        step_number: 1,
+        subject: '',
+        body: '',
+        status: 'queued',
+      })
+      .select('id')
+      .single();
+
+    if (messageError || !message) throw new AppError(500, 'Failed to create initial email message', messageError);
+
+    await enqueueSendEmail({
+      emailMessageId: message.id,
+      organizationId: orgId,
+      campaignId,
+      leadId: lead.id,
+      stepNumber: 1,
+    }, {
+      jobId: `send-email:${message.id}`,
+    });
+
+    queued++;
+  }
+
+  return queued;
 }
 
 export async function deleteCampaign(orgId: string, id: string) {
@@ -289,4 +369,77 @@ export async function deleteCampaign(orgId: string, id: string) {
   if (error) throw new AppError(500, 'Failed to delete campaign', error);
   if (!data) throw new AppError(404, 'Campaign not found');
   return { success: true };
+}
+
+export async function getSequenceSteps(orgId: string, campaignId: string) {
+  await getCampaign(orgId, campaignId);
+
+  const { data, error } = await supabase
+    .from('email_sequence_steps')
+    .select('id,campaign_id,step_number,delay_days,subject_template,body_prompt_context')
+    .eq('campaign_id', campaignId)
+    .order('step_number', { ascending: true });
+
+  if (error) throw new AppError(500, 'Failed to fetch sequence steps', error);
+
+  return {
+    items: (data ?? []).map(row => ({
+      id: row.id,
+      stepNumber: row.step_number,
+      delayDays: row.delay_days,
+      subjectTemplate: row.subject_template,
+      bodyPromptContext: row.body_prompt_context,
+    })),
+  };
+}
+
+export async function upsertSequenceSteps(orgId: string, campaignId: string, input: SequenceStepsUpsertInput) {
+  await getCampaign(orgId, campaignId);
+
+  const { error: deleteError } = await supabase
+    .from('email_sequence_steps')
+    .delete()
+    .eq('campaign_id', campaignId);
+
+  if (deleteError) throw new AppError(500, 'Failed to clear existing steps', deleteError);
+
+  const records = input.steps.map(step => ({
+    campaign_id: campaignId,
+    step_number: step.stepNumber,
+    delay_days: step.delayDays,
+    subject_template: step.subjectTemplate,
+    body_prompt_context: step.bodyPromptContext,
+  }));
+
+  const { data, error } = await supabase
+    .from('email_sequence_steps')
+    .insert(records)
+    .select('id,campaign_id,step_number,delay_days,subject_template,body_prompt_context');
+
+  if (error) throw new AppError(500, 'Failed to save sequence steps', error);
+
+  return {
+    items: (data ?? []).map(row => ({
+      id: row.id,
+      stepNumber: row.step_number,
+      delayDays: row.delay_days,
+      subjectTemplate: row.subject_template,
+      bodyPromptContext: row.body_prompt_context,
+    })),
+  };
+}
+
+export async function assignLeadsToCampaign(orgId: string, campaignId: string, input: AssignLeadsInput) {
+  await getCampaign(orgId, campaignId);
+
+  const { data, error } = await supabase
+    .from('leads')
+    .update({ campaign_id: campaignId, updated_at: new Date().toISOString() })
+    .eq('organization_id', orgId)
+    .in('id', input.leadIds)
+    .select('id');
+
+  if (error) throw new AppError(500, 'Failed to assign leads', error);
+
+  return { assigned: data?.length ?? 0 };
 }
