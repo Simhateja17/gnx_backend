@@ -4,11 +4,15 @@ import { env } from '../config/env';
 export const redis = new IORedis(env.REDIS_URL, {
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
+  lazyConnect: true,
 });
 
-// Plain connection options for BullMQ Queue/Worker constructors.
-// BullMQ v5 bundles its own ioredis internally, so passing an IORedis instance
-// causes a type clash. Passing options lets BullMQ create its own connection.
+redis.on('error', (err) => {
+  console.warn('[Redis] connection error (workers will be unavailable):', err.message);
+});
+
+redis.connect().catch(() => {});
+
 const parsed = new URL(env.REDIS_URL);
 export const redisConnection = {
   host:                 parsed.hostname,
