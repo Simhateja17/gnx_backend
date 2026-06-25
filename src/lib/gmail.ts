@@ -41,6 +41,7 @@ export async function sendGmailMessage(
   to: string,
   subject: string,
   body: string,
+  options: { threadId?: string | null } = {},
 ) {
   const client = getAuthedClient(accessToken, refreshToken);
   const gmail = google.gmail({ version: 'v1', auth: client });
@@ -57,7 +58,10 @@ export async function sendGmailMessage(
 
   const result = await gmail.users.messages.send({
     userId: 'me',
-    requestBody: { raw },
+    requestBody: {
+      raw,
+      ...(options.threadId ? { threadId: options.threadId } : {}),
+    },
   });
 
   return {

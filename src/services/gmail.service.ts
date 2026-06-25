@@ -80,7 +80,7 @@ export async function pollInbox(organizationId: string, connectedAccountId: stri
 
         const { data: originalMsg } = await supabase
           .from('email_messages')
-          .select('id, lead_id, campaign_id, subject')
+          .select('id, lead_id, campaign_id, subject, gmail_thread_id')
           .eq('gmail_thread_id', threadId)
           .eq('organization_id', organizationId)
           .order('created_at', { ascending: true })
@@ -133,7 +133,13 @@ export async function pollInbox(organizationId: string, connectedAccountId: stri
 async function saveAiDraftReply(input: {
   organizationId: string;
   emailReplyId: string;
-  originalMessage: { id: string; lead_id: string; campaign_id: string | null; subject: string | null };
+  originalMessage: {
+    id: string;
+    lead_id: string;
+    campaign_id: string | null;
+    subject: string | null;
+    gmail_thread_id: string | null;
+  };
   autoApproveReplies: boolean;
 }) {
   const { organizationId, emailReplyId, originalMessage, autoApproveReplies } = input;
@@ -154,6 +160,7 @@ async function saveAiDraftReply(input: {
         step_number: 1,
         subject,
         body: generated.body,
+        gmail_thread_id: originalMessage.gmail_thread_id,
         status: 'queued',
       })
       .select('id')

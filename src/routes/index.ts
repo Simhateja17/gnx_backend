@@ -13,6 +13,7 @@ import dashboardRoutes from './dashboard.routes';
 import settingsRoutes from './settings.routes';
 import adminRoutes from './admin.routes';
 import supportRoutes from './support.routes';
+import systemRoutes from './system.routes';
 
 const router = Router();
 
@@ -30,5 +31,6 @@ router.use('/dashboard', dashboardRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/admin', adminRoutes);
 router.use('/support', supportRoutes);
+router.use('/system', systemRoutes);
 
 export default router;
