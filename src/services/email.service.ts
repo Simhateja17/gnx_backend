@@ -1,7 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { sendGmailMessage } from '../lib/gmail';
 import { enqueueSendEmail } from '../jobs/send-email.job';
-import { generateEmail } from './ai.service';
+import { generateEmail, generateReply } from './ai.service';
 import { AppError } from '../types';
 
 const UNSUBSCRIBE_FOOTER = `\n\n---\nIf you'd like to stop receiving emails, reply "unsubscribe"\nGlobonexo | Company Address`;
@@ -63,6 +63,116 @@ export async function checkSendCap(organizationId: string) {
     remaining: Math.max(0, cap - sentToday),
     paused: sentToday >= cap,
   };
+}
+
+export async function approveAiDraftReply(organizationId: string, replyId: string, editedBody?: string) {
+  const { data: reply, error } = await supabase
+    .from('email_replies')
+    .select('id, lead_id, ai_draft_reply, ai_draft_status, email_messages(subject, campaign_id, gmail_thread_id)')
+    .eq('id', replyId)
+    .eq('organization_id', organizationId)
+    .single();
+
+  if (error || !reply) throw new AppError(404, 'Email reply not found', error);
+  const approvedBody = editedBody?.trim() || reply.ai_draft_reply;
+  if (!approvedBody) throw new AppError(400, 'No AI draft reply is available to approve');
+
+  const originalMessage = reply.email_messages as any;
+  const subject = originalMessage?.subject?.toLowerCase().startsWith('re:')
+    ? originalMessage.subject
+    : `Re: ${originalMessage?.subject || 'Your message'}`;
+
+  const { data: queued, error: queueError } = await supabase
+    .from('email_messages')
+    .insert({
+      organization_id: organizationId,
+      campaign_id: originalMessage?.campaign_id ?? null,
+      lead_id: reply.lead_id,
+      step_number: 1,
+      subject,
+      body: approvedBody,
+      gmail_thread_id: originalMessage?.gmail_thread_id ?? null,
+      status: 'queued',
+    })
+    .select('id')
+    .single();
+
+  if (queueError || !queued) throw new AppError(500, 'Failed to queue approved AI reply', queueError);
+
+  await supabase
+    .from('email_replies')
+    .update({
+      ai_draft_reply: approvedBody,
+      ai_draft_status: 'approved',
+    })
+    .eq('id', replyId)
+    .eq('organization_id', organizationId);
+
+  await enqueueSendEmail({
+    emailMessageId: queued.id,
+    organizationId,
+    campaignId: originalMessage?.campaign_id ?? undefined,
+    leadId: reply.lead_id,
+  }, {
+    jobId: `send-email:${queued.id}`,
+  });
+
+  return {
+    id: reply.id,
+    ai_draft_reply: approvedBody,
+    ai_draft_status: 'approved',
+    queuedEmailMessageId: queued.id,
+  };
+}
+
+export async function updateAiDraftReply(organizationId: string, replyId: string, body: string) {
+  const draft = body.trim();
+  if (!draft) throw new AppError(400, 'AI draft reply body is required');
+
+  const { data, error } = await supabase
+    .from('email_replies')
+    .update({
+      ai_draft_reply: draft,
+      ai_draft_status: 'pending',
+    })
+    .eq('id', replyId)
+    .eq('organization_id', organizationId)
+    .select('id, ai_draft_reply, ai_draft_status')
+    .single();
+
+  if (error || !data) throw new AppError(404, 'Email reply not found', error);
+  return data;
+}
+
+export async function regenerateAiDraftReply(organizationId: string, replyId: string) {
+  const generated = await generateReply(organizationId, { emailReplyId: replyId });
+
+  const { data, error } = await supabase
+    .from('email_replies')
+    .update({
+      ai_draft_reply: generated.body,
+      ai_draft_status: 'pending',
+    })
+    .eq('id', replyId)
+    .eq('organization_id', organizationId)
+    .select('id, ai_draft_reply, ai_draft_status')
+    .single();
+
+  if (error || !data) throw new AppError(404, 'Email reply not found', error);
+  return data;
+}
+
+export async function rejectAiDraftReply(organizationId: string, replyId: string) {
+  const { data, error } = await supabase
+    .from('email_replies')
+    .update({ ai_draft_status: 'rejected' })
+    .eq('id', replyId)
+    .eq('organization_id', organizationId)
+    .select('id, ai_draft_reply, ai_draft_status')
+    .single();
+
+  if (error || !data) throw new AppError(404, 'Email reply not found', error);
+  return data;
 }
 
 export async function sendEmail(emailMessageId: string, organizationId: string) {
@@ -128,6 +238,7 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
       toEmail,
       subject,
       body,
+      { threadId: msg.gmail_thread_id },
     );
 
     await supabase
