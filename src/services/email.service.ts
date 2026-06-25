@@ -1,9 +1,11 @@
 import { supabase } from '../lib/supabase';
 import { sendGmailMessage } from '../lib/gmail';
+import { enqueueSendEmail } from '../jobs/send-email.job';
 import { generateEmail } from './ai.service';
 import { AppError } from '../types';
 
 const UNSUBSCRIBE_FOOTER = `\n\n---\nIf you'd like to stop receiving emails, reply "unsubscribe"\nGlobonexo | Company Address`;
+const STOP_SEQUENCE_STATUSES = ['engaged', 'meeting_booked', 'not_interested', 'unsubscribed'];
 
 async function getGmailCredentials(organizationId: string) {
   const { data, error } = await supabase
@@ -72,7 +74,7 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
 
   const { data: msg, error: msgError } = await supabase
     .from('email_messages')
-    .select('*, leads(id, email, first_name, last_name, name, title, company)')
+    .select('*, leads(id, email, first_name, last_name, name, title, company, status), campaigns(status)')
     .eq('id', emailMessageId)
     .eq('organization_id', organizationId)
     .single();
@@ -82,13 +84,23 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
   const toEmail = msg.leads?.email;
   if (!toEmail) throw new AppError(400, 'Lead has no email address');
 
+  const stepNumber = msg.step_number ?? 1;
+  if (stepNumber > 1 && STOP_SEQUENCE_STATUSES.includes(msg.leads?.status)) {
+    await markEmailSkipped(emailMessageId);
+    return { success: false, reason: 'sequence_stopped', leadStatus: msg.leads?.status };
+  }
+
+  if (stepNumber > 1 && msg.campaigns?.status !== 'active') {
+    await markEmailSkipped(emailMessageId);
+    return { success: false, reason: 'campaign_not_active', campaignStatus: msg.campaigns?.status };
+  }
+
   let subject = msg.subject;
   let body = msg.body;
 
   if (!subject || !body) {
     const campaignId = msg.campaign_id;
     const leadId = msg.lead_id;
-    const stepNumber = msg.step_number ?? 1;
 
     if (campaignId && leadId) {
       const generated = await generateEmail(organizationId, { campaignId, leadId, stepNumber });
@@ -134,6 +146,15 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
       .eq('id', msg.lead_id)
       .eq('status', 'queued');
 
+    if (msg.sequence_step_id && msg.campaign_id && msg.lead_id) {
+      await enqueueNextSequenceStep({
+        organizationId,
+        campaignId: msg.campaign_id,
+        leadId: msg.lead_id,
+        currentStepNumber: stepNumber,
+      });
+    }
+
     return { success: true, gmailMessageId: result.messageId };
   } catch (err: any) {
     await supabase
@@ -143,4 +164,82 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
 
     throw new AppError(502, `Gmail send failed: ${err.message}`);
   }
+}
+
+async function markEmailSkipped(emailMessageId: string) {
+  await supabase
+    .from('email_messages')
+    .update({ status: 'skipped' })
+    .eq('id', emailMessageId);
+}
+
+async function enqueueNextSequenceStep(input: {
+  organizationId: string;
+  campaignId: string;
+  leadId: string;
+  currentStepNumber: number;
+}) {
+  const { organizationId, campaignId, leadId, currentStepNumber } = input;
+
+  const { data: nextStep, error: stepError } = await supabase
+    .from('email_sequence_steps')
+    .select('id,step_number,delay_days')
+    .eq('campaign_id', campaignId)
+    .gt('step_number', currentStepNumber)
+    .order('step_number', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (stepError) throw new AppError(500, 'Failed to fetch next sequence step', stepError);
+  if (!nextStep) return;
+
+  const { data: lead, error: leadError } = await supabase
+    .from('leads')
+    .select('status,email')
+    .eq('organization_id', organizationId)
+    .eq('id', leadId)
+    .single();
+
+  if (leadError || !lead) throw new AppError(404, 'Lead not found for next sequence step', leadError);
+  if (!lead.email || STOP_SEQUENCE_STATUSES.includes(lead.status)) return;
+
+  const { data: existing, error: existingError } = await supabase
+    .from('email_messages')
+    .select('id')
+    .eq('organization_id', organizationId)
+    .eq('campaign_id', campaignId)
+    .eq('lead_id', leadId)
+    .eq('step_number', nextStep.step_number)
+    .maybeSingle();
+
+  if (existingError) throw new AppError(500, 'Failed to check existing next sequence email', existingError);
+  if (existing) return;
+
+  const { data: message, error: messageError } = await supabase
+    .from('email_messages')
+    .insert({
+      organization_id: organizationId,
+      campaign_id: campaignId,
+      lead_id: leadId,
+      sequence_step_id: nextStep.id,
+      step_number: nextStep.step_number,
+      subject: '',
+      body: '',
+      status: 'queued',
+    })
+    .select('id')
+    .single();
+
+  if (messageError || !message) throw new AppError(500, 'Failed to create next sequence email', messageError);
+
+  await enqueueSendEmail({
+    emailMessageId: message.id,
+    organizationId,
+    campaignId,
+    leadId,
+    stepNumber: nextStep.step_number,
+  }, {
+    delay: Math.max(0, nextStep.delay_days) * 24 * 60 * 60 * 1000,
+    jobId: `send-email:${message.id}`,
+  });
 }

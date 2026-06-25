@@ -1,6 +1,7 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
 import { supabase } from '../lib/supabase';
+import { enqueueRecurringPollInbox } from '../jobs/poll-inbox.job';
 import { getAuthUrl, exchangeCode, createOAuth2Client } from '../lib/gmail';
 import { google } from 'googleapis';
 import { AppError } from '../types';
@@ -56,15 +57,24 @@ router.post('/callback', async (req: AuthenticatedRequest, res: Response, next: 
       .eq('provider', 'gmail')
       .maybeSingle();
 
+    let connectedAccountId: string | null = null;
     if (existing) {
       await supabase
         .from('connected_accounts')
         .update(record)
         .eq('id', existing.id);
+      connectedAccountId = existing.id;
     } else {
-      await supabase
+      const { data: created } = await supabase
         .from('connected_accounts')
-        .insert(record);
+        .insert(record)
+        .select('id')
+        .single();
+      connectedAccountId = created?.id ?? null;
+    }
+
+    if (connectedAccountId) {
+      await enqueueRecurringPollInbox({ organizationId: orgId, connectedAccountId });
     }
 
     res.json({ success: true, email });

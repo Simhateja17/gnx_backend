@@ -30,7 +30,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response, next: NextFunct
 
     const { data: replies, error } = await supabase
       .from('email_replies')
-      .select('id, body, received_at, email_message_id, lead_id, leads(first_name, last_name, company), email_messages(subject)')
+      .select('id, body, ai_draft_status, received_at, email_message_id, lead_id, leads(first_name, last_name, company), email_messages(subject)')
       .eq('organization_id', orgId)
       .order('received_at', { ascending: false })
       .limit(50);
@@ -48,6 +48,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response, next: NextFunct
         company: lead?.company || '',
         subject: msg?.subject || 'No subject',
         preview: (reply.body || '').slice(0, 120),
+        aiDraftStatus: reply.ai_draft_status,
         time: timeAgo(reply.received_at),
         receivedAt: reply.received_at,
         emailMessageId: reply.email_message_id,
@@ -65,7 +66,7 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response, next: NextFu
     const orgId = getOrgId(req);
     const { data: reply, error } = await supabase
       .from('email_replies')
-      .select('*, leads(first_name, last_name, company, email, title), email_messages(subject, body, sent_at)')
+      .select('id, body, ai_draft_reply, ai_draft_status, received_at, email_message_id, lead_id, leads(first_name, last_name, company, email, title), email_messages(subject, body, sent_at)')
       .eq('organization_id', orgId)
       .eq('id', req.params.id)
       .single();
