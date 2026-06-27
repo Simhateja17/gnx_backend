@@ -8,6 +8,7 @@ import { env } from './config/env';
 import { errorHandler } from './middleware/error.middleware';
 import { rateLimiter } from './middleware/rate-limit.middleware';
 import routes from './routes';
+import * as voiceService from './services/voice.service';
 
 const app = express();
 
@@ -21,6 +22,17 @@ app.use(cors({
   origin: [env.FRONTEND_URL, 'http://localhost:3000', 'http://localhost:3001'],
   credentials: true,
 }));
+
+// Retell webhook — must come before express.json() so we receive the raw bytes for signature verification
+app.post('/webhooks/retell', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    await voiceService.handleRetellWebhook(req.body as Buffer, req.headers['x-retell-signature'] as string ?? '');
+    res.json({ received: true });
+  } catch (err: any) {
+    res.status(err.statusCode ?? 500).json({ error: err.message });
+  }
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser(env.COOKIE_SECRET));
