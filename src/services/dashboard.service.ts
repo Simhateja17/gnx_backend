@@ -18,33 +18,93 @@ export async function getDashboard(userId: string, orgId: string) {
   weekStart.setDate(now.getDate() - now.getDay());
   weekStart.setHours(0, 0, 0, 0);
 
-  const { data: user } = await supabase
-    .from('users')
-    .select('first_name, last_name')
-    .eq('id', userId)
-    .single();
-
-  const [emailsResult, repliesResult, leadsResult, campaignsResult, agentResult, gmailResult] = await Promise.all([
+  const [
+    userResult,
+    emailsResult,
+    repliesResult,
+    meetingActivityResult,
+    emailsSentResult,
+    repliesCountResult,
+    leadsCountResult,
+    meetingsCountResult,
+    weeklyMeetingsResult,
+    hotLeadsResult,
+    activeCampaignsResult,
+    pendingDraftsResult,
+    queuedEmailsResult,
+    agentResult,
+    gmailResult,
+    nextMeetingResult,
+  ] = await Promise.all([
+    supabase
+      .from('users')
+      .select('first_name, last_name')
+      .eq('id', userId)
+      .single(),
     supabase
       .from('email_messages')
       .select('id, subject, status, sent_at, created_at, lead_id, leads(first_name, last_name, company)')
       .eq('organization_id', orgId)
-      .order('created_at', { ascending: false })
-      .limit(50),
+      .eq('status', 'sent')
+      .order('sent_at', { ascending: false, nullsFirst: false })
+      .limit(10),
     supabase
       .from('email_replies')
       .select('id, body, ai_draft_status, received_at, lead_id, leads(first_name, last_name, company)')
       .eq('organization_id', orgId)
       .order('received_at', { ascending: false })
-      .limit(50),
+      .limit(10),
     supabase
       .from('leads')
-      .select('id, status, score, first_name, last_name, company, email, created_at')
+      .select('id, first_name, last_name, company, updated_at')
+      .eq('organization_id', orgId)
+      .eq('status', 'meeting_booked')
+      .order('updated_at', { ascending: false })
+      .limit(5),
+    supabase
+      .from('email_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('status', 'sent'),
+    supabase
+      .from('email_replies')
+      .select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId),
     supabase
-      .from('campaigns')
-      .select('id, name, status, created_at')
+      .from('leads')
+      .select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId),
+    supabase
+      .from('leads')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('status', 'meeting_booked'),
+    supabase
+      .from('leads')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('status', 'meeting_booked')
+      .gte('updated_at', weekStart.toISOString()),
+    supabase
+      .from('leads')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .or('score.gte.80,status.eq.engaged'),
+    supabase
+      .from('campaigns')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('status', 'active'),
+    supabase
+      .from('email_replies')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('ai_draft_status', 'pending'),
+    supabase
+      .from('email_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('status', 'queued'),
     supabase
       .from('agent_configs')
       .select('meeting_target, booking_link')
@@ -56,32 +116,53 @@ export async function getDashboard(userId: string, orgId: string) {
       .eq('organization_id', orgId)
       .eq('provider', 'gmail')
       .maybeSingle(),
+    supabase
+      .from('meetings')
+      .select('id, title, scheduled_at, duration_minutes, join_url, leads(first_name, last_name, title, company)')
+      .eq('organization_id', orgId)
+      .eq('status', 'scheduled')
+      .gte('scheduled_at', now.toISOString())
+      .order('scheduled_at', { ascending: true })
+      .limit(1)
+      .maybeSingle(),
   ]);
 
-  if (emailsResult.error) throw new AppError(500, 'Failed to fetch email data');
-  if (repliesResult.error) throw new AppError(500, 'Failed to fetch reply data');
-  if (leadsResult.error) throw new AppError(500, 'Failed to fetch leads data');
-  if (campaignsResult.error) throw new AppError(500, 'Failed to fetch campaign data');
+  const dashboardErrors = [
+    ['user', userResult.error],
+    ['email activity', emailsResult.error],
+    ['reply activity', repliesResult.error],
+    ['meeting activity', meetingActivityResult.error],
+    ['email count', emailsSentResult.error],
+    ['reply count', repliesCountResult.error],
+    ['lead count', leadsCountResult.error],
+    ['meeting count', meetingsCountResult.error],
+    ['weekly meeting count', weeklyMeetingsResult.error],
+    ['hot lead count', hotLeadsResult.error],
+    ['campaign count', activeCampaignsResult.error],
+    ['pending draft count', pendingDraftsResult.error],
+    ['queued email count', queuedEmailsResult.error],
+    ['agent configuration', agentResult.error],
+    ['Gmail connection', gmailResult.error],
+    ['next meeting', nextMeetingResult.error],
+  ] as const;
+  const failedQuery = dashboardErrors.find(([, error]) => error);
+  if (failedQuery) {
+    throw new AppError(500, `Failed to fetch dashboard ${failedQuery[0]}`, failedQuery[1]);
+  }
 
   const emails = emailsResult.data ?? [];
   const replies = repliesResult.data ?? [];
-  const leads = leadsResult.data ?? [];
-  const campaigns = campaignsResult.data ?? [];
-  const activeCampaigns = campaigns.filter(c => c.status === 'active');
-
-  const emailsSent = emails.filter(e => e.status === 'sent').length;
-  const queuedEmails = emails.filter(e => e.status === 'queued').length;
-  const replyCount = replies.length;
-  const meetingsBooked = leads.filter(l => l.status === 'meeting_booked').length;
-  const weeklyMeetingsBooked = leads.filter(l =>
-    l.status === 'meeting_booked' &&
-    l.created_at &&
-    new Date(l.created_at).getTime() >= weekStart.getTime()
-  ).length;
-  const hotLeads = leads.filter(l => (l.score ?? 0) >= 80 || l.status === 'engaged').length;
+  const meetingActivity = meetingActivityResult.data ?? [];
+  const emailsSent = emailsSentResult.count ?? 0;
+  const queuedEmails = queuedEmailsResult.count ?? 0;
+  const replyCount = repliesCountResult.count ?? 0;
+  const meetingsBooked = meetingsCountResult.count ?? 0;
+  const weeklyMeetingsBooked = weeklyMeetingsResult.count ?? 0;
+  const hotLeads = hotLeadsResult.count ?? 0;
   const replyRate = emailsSent > 0 ? ((replyCount / emailsSent) * 100).toFixed(1) : '0';
-  const pendingDrafts = replies.filter(r => r.ai_draft_status === 'pending').length;
-  const savedLeads = leads.length;
+  const pendingDrafts = pendingDraftsResult.count ?? 0;
+  const savedLeads = leadsCountResult.count ?? 0;
+  const activeCampaigns = activeCampaignsResult.count ?? 0;
   const monthlyMeetingTarget = agentResult.data?.meeting_target ?? 15;
   const weeklyMeetingTarget = Math.max(1, Math.ceil(monthlyMeetingTarget / 4));
 
@@ -95,7 +176,7 @@ export async function getDashboard(userId: string, orgId: string) {
 
   const activity: ActivityItem[] = [];
 
-  for (const email of emails.filter(e => e.status === 'sent').slice(0, 20)) {
+  for (const email of emails) {
     const lead = email.leads as any;
     const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || 'Unknown';
     const company = lead?.company || '';
@@ -109,7 +190,7 @@ export async function getDashboard(userId: string, orgId: string) {
     });
   }
 
-  for (const reply of replies.slice(0, 20)) {
+  for (const reply of replies) {
     const lead = reply.leads as any;
     const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || 'Unknown';
     const company = lead?.company || '';
@@ -122,13 +203,13 @@ export async function getDashboard(userId: string, orgId: string) {
     });
   }
 
-  for (const lead of leads.filter(l => l.status === 'meeting_booked').slice(0, 5)) {
+  for (const lead of meetingActivity) {
     const name = [lead.first_name, lead.last_name].filter(Boolean).join(' ') || 'Unknown';
     activity.push({
       type: 'meeting',
       text: `Meeting booked with ${name}${lead.company ? ` · ${lead.company}` : ''}`,
-      time: new Date().toISOString(),
-      timeAgo: '',
+      time: lead.updated_at,
+      timeAgo: timeAgo(lead.updated_at),
       hot: true,
     });
   }
@@ -160,7 +241,7 @@ export async function getDashboard(userId: string, orgId: string) {
       href: '/campaigns',
       priority: 'medium',
     }] : []),
-    ...(activeCampaigns.length === 0 ? [{
+    ...(activeCampaigns === 0 ? [{
       type: 'campaign',
       title: 'Start a campaign',
       detail: 'No active campaigns are running right now.',
@@ -178,10 +259,13 @@ export async function getDashboard(userId: string, orgId: string) {
     }] : []),
   ].slice(0, 5);
 
+  const nextMeeting = nextMeetingResult.data;
+  const nextMeetingLead = nextMeeting?.leads as any;
+
   return {
     user: {
-      firstName: user?.first_name ?? '',
-      lastName: user?.last_name ?? '',
+      firstName: userResult.data?.first_name ?? '',
+      lastName: userResult.data?.last_name ?? '',
     },
     kpis: {
       emailsSent,
@@ -189,7 +273,7 @@ export async function getDashboard(userId: string, orgId: string) {
       meetings: meetingsBooked,
       hotLeads,
       replyRate,
-      activeCampaigns: activeCampaigns.length,
+      activeCampaigns,
       savedLeads,
     },
     activity: activity.slice(0, 10),
@@ -201,6 +285,18 @@ export async function getDashboard(userId: string, orgId: string) {
       monthlyTarget: monthlyMeetingTarget,
       progress: Math.min(100, Math.round((weeklyMeetingsBooked / weeklyMeetingTarget) * 100)),
     },
+    nextMeeting: nextMeeting ? {
+      id: nextMeeting.id,
+      title: nextMeeting.title,
+      scheduledAt: nextMeeting.scheduled_at,
+      durationMinutes: nextMeeting.duration_minutes,
+      joinUrl: nextMeeting.join_url,
+      attendee: {
+        name: [nextMeetingLead?.first_name, nextMeetingLead?.last_name].filter(Boolean).join(' ') || 'Guest',
+        title: nextMeetingLead?.title ?? '',
+        company: nextMeetingLead?.company ?? '',
+      },
+    } : null,
   };
 }
 
