@@ -22,7 +22,7 @@ export async function getSettings(userId: string, orgId: string) {
   // agent_configs may not exist yet if onboarding was skipped — return defaults gracefully
   const { data: config } = await supabase
     .from('agent_configs')
-    .select('tone, auto_approve_replies, daily_email_send_cap, booking_link')
+    .select('tone, auto_approve_replies, daily_email_send_cap, booking_link, retell_phone_number, retell_agent_id')
     .eq('organization_id', orgId)
     .single();
 
@@ -41,6 +41,8 @@ export async function getSettings(userId: string, orgId: string) {
       autoApproveReplies: config?.auto_approve_replies ?? false,
       dailyEmailSendCap:  config?.daily_email_send_cap ?? 100,
       bookingLink:        config?.booking_link         ?? '',
+      retellPhoneNumber:  config?.retell_phone_number  ?? '',
+      retellAgentId:      config?.retell_agent_id      ?? null,
     },
   };
 }
@@ -69,6 +71,7 @@ export async function updateSettings(userId: string, orgId: string, input: Updat
   if (input.autoApproveReplies !== undefined) configPatch.auto_approve_replies = input.autoApproveReplies;
   if (input.dailyEmailSendCap  !== undefined) configPatch.daily_email_send_cap = input.dailyEmailSendCap;
   if (input.bookingLink        !== undefined) configPatch.booking_link         = input.bookingLink;
+  if (input.retellPhoneNumber  !== undefined) configPatch.retell_phone_number  = input.retellPhoneNumber || null;
 
   if (Object.keys(configPatch).length > 0) {
     const { error } = await supabase
