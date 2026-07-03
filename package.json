@@ -26,6 +26,7 @@
     "ioredis": "^5.4.1",
     "multer": "^2.2.0",
     "openai": "^4.47.0",
+    "posthog-node": "^4.2.0",
     "resend": "^3.2.0",
     "retell-sdk": "^4.0.0",
     "stripe": "^15.6.0",

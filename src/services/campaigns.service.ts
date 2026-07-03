@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { enqueueSendEmail } from '../jobs/send-email.job';
 import { enqueueScheduleCall } from '../jobs/schedule-call.job';
+import { posthog } from '../lib/posthog';
 import { AppError } from '../types';
 import type { AssignLeadsInput, CampaignCreateInput, CampaignUpdateInput, SequenceStepsUpsertInput } from '../schemas/campaigns.schema';
 
@@ -277,6 +278,14 @@ export async function setCampaignStatus(
   if (!data) throw new AppError(404, 'Campaign not found');
   const stats = await getStatsByCampaign(orgId, [id]);
   const campaign = toApiCampaign(data as unknown as CampaignRow, stats.get(id));
+
+  if (status === 'active') {
+    posthog?.capture({
+      distinctId: orgId,
+      event: 'campaign_launched',
+      properties: { campaignId: id, channel: campaign.channel },
+    });
+  }
 
   if (status === 'active' && campaign.channel === 'email') {
     const queued = await enqueueInitialEmailStep(orgId, id);
