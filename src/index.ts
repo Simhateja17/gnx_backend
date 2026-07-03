@@ -12,6 +12,10 @@ import * as voiceService from './services/voice.service';
 
 const app = express();
 
+// Trust the first proxy hop (Vercel's edge today, Nginx/Caddy on GCP later) so
+// express-rate-limit can safely read X-Forwarded-For for per-IP limits.
+app.set('trust proxy', 1);
+
 Sentry.init({
   dsn: env.SENTRY_DSN,
   environment: env.NODE_ENV,
