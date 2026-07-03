@@ -6,7 +6,7 @@ import cookieParser from 'cookie-parser';
 import * as Sentry from '@sentry/node';
 import { env } from './config/env';
 import { errorHandler } from './middleware/error.middleware';
-import { rateLimiter } from './middleware/rate-limit.middleware';
+import { rateLimiter, webhookRateLimiter } from './middleware/rate-limit.middleware';
 import routes from './routes';
 import * as voiceService from './services/voice.service';
 
@@ -24,7 +24,7 @@ app.use(cors({
 }));
 
 // Retell webhook — must come before express.json() so we receive the raw bytes for signature verification
-app.post('/webhooks/retell', express.raw({ type: 'application/json' }), async (req, res) => {
+app.post('/webhooks/retell', webhookRateLimiter, express.raw({ type: 'application/json' }), async (req, res) => {
   try {
     await voiceService.handleRetellWebhook(req.body as Buffer, req.headers['x-retell-signature'] as string ?? '');
     res.json({ received: true });

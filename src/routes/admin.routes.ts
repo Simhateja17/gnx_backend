@@ -1,6 +1,10 @@
 import { Router } from 'express';
+import { authenticate, requireAdmin } from '../middleware/auth.middleware';
 
 const router = Router();
+
+router.use(authenticate);
+router.use(requireAdmin);
 
 // TODO: implement admin endpoints
 router.get('/organizations', (_req, res) => res.json({ todo: 'list organizations' }));
