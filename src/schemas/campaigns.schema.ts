@@ -9,7 +9,7 @@ export const campaignChannelSchema = z.enum(['email', 'voice']);
 export const campaignCreateSchema = z.object({
   name: z.string().trim().min(3).max(120),
   channel: campaignChannelSchema,
-  icpSource: z.string().trim().min(2).max(240),
+  icpSource: z.string().trim().max(240).optional().default(''),
   promptNotes: z.string().trim().max(2000).optional().default(''),
   maxLeads: z.coerce.number().int().min(1).max(10000).default(100),
   dailySendCap: z.coerce.number().int().min(1).max(500).default(75),
