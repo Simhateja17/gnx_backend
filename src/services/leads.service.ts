@@ -179,7 +179,7 @@ export async function searchApollo(input: ApolloSearchInput) {
   if (input.companySizes.length > 0) body.organization_num_employees_ranges = input.companySizes;
   if (input.keywords) body.q_keywords = input.keywords;
 
-  const response = await fetch('https://api.apollo.io/api/v1/mixed_people/search', {
+  const response = await fetch('https://api.apollo.io/api/v1/mixed_people/api_search', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
