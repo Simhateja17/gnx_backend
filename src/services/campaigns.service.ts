@@ -24,9 +24,15 @@ type CampaignRow = {
 
 type CampaignStats = {
   enrolled: number;
+  ready: number;
+  missingEmail: number;
+  stopped: number;
+  queued: number;
   sent: number;
   meetings: number;
 };
+
+const STOP_SEQUENCE_STATUSES = ['engaged', 'meeting_booked', 'not_interested', 'unsubscribed'];
 
 const CAMPAIGN_COLUMNS = [
   'id',
@@ -86,7 +92,7 @@ function toApiCampaign(row: CampaignRow, stats?: CampaignStats) {
     timezone: row.timezone,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    stats: stats ?? { enrolled: 0, sent: 0, meetings: 0 },
+    stats: stats ?? { enrolled: 0, ready: 0, missingEmail: 0, stopped: 0, queued: 0, sent: 0, meetings: 0 },
   };
 }
 
@@ -103,14 +109,14 @@ async function getDefaultAgentConfigId(orgId: string) {
 
 async function getStatsByCampaign(orgId: string, campaignIds: string[]) {
   const stats = new Map<string, CampaignStats>();
-  campaignIds.forEach(id => stats.set(id, { enrolled: 0, sent: 0, meetings: 0 }));
+  campaignIds.forEach(id => stats.set(id, { enrolled: 0, ready: 0, missingEmail: 0, stopped: 0, queued: 0, sent: 0, meetings: 0 }));
 
   if (campaignIds.length === 0) return stats;
 
   const [leadsResult, emailResult, callsResult] = await Promise.all([
     supabase
       .from('leads')
-      .select('campaign_id,status')
+      .select('campaign_id,status,email')
       .eq('organization_id', orgId)
       .in('campaign_id', campaignIds),
     supabase
@@ -134,13 +140,18 @@ async function getStatsByCampaign(orgId: string, campaignIds: string[]) {
     const entry = stats.get(lead.campaign_id);
     if (!entry) continue;
     entry.enrolled += 1;
+    if (!lead.email) entry.missingEmail += 1;
+    else if (STOP_SEQUENCE_STATUSES.includes(lead.status)) entry.stopped += 1;
+    else entry.ready += 1;
     if (lead.status === 'meeting_booked') entry.meetings += 1;
   }
 
   for (const message of emailResult.data ?? []) {
-    if (!message.campaign_id || message.status !== 'sent') continue;
+    if (!message.campaign_id) continue;
     const entry = stats.get(message.campaign_id);
-    if (entry) entry.sent += 1;
+    if (!entry) continue;
+    if (message.status === 'queued') entry.queued += 1;
+    if (message.status === 'sent') entry.sent += 1;
   }
 
   for (const call of callsResult.data ?? []) {
@@ -264,6 +275,26 @@ export async function setCampaignStatus(
   id: string,
   status: 'active' | 'paused' | 'completed'
 ) {
+  console.log(`[campaigns] Setting campaign ${id} to ${status} for org ${orgId}`);
+
+  const { data: currentData, error: currentError } = await supabase
+    .from('campaigns')
+    .select(CAMPAIGN_COLUMNS)
+    .eq('organization_id', orgId)
+    .eq('id', id)
+    .maybeSingle();
+
+  if (currentError) throw new AppError(500, 'Failed to fetch campaign before status change', currentError);
+  if (!currentData) throw new AppError(404, 'Campaign not found');
+
+  const current = currentData as unknown as CampaignRow;
+  if (status === 'active' && current.channel === 'email') {
+    const readiness = await getEmailLaunchReadiness(orgId, id);
+    if (readiness.ready === 0) {
+      throw new AppError(400, 'Campaign has no send-ready leads. Reveal or upload lead emails before launching.', readiness);
+    }
+  }
+
   const { data, error } = await supabase
     .from('campaigns')
     .update({ status, updated_at: new Date().toISOString() })
@@ -278,14 +309,49 @@ export async function setCampaignStatus(
   const campaign = toApiCampaign(data as unknown as CampaignRow, stats.get(id));
 
   if (status === 'active' && campaign.channel === 'email') {
-    const queued = await enqueueInitialEmailStep(orgId, id);
-    return { ...campaign, queued };
+    try {
+      const queued = await enqueueInitialEmailStep(orgId, id);
+      console.log(`[campaigns] Campaign ${id} launched. Queued ${queued} initial email job(s).`);
+      return { ...campaign, queued };
+    } catch (err) {
+      await supabase
+        .from('campaigns')
+        .update({ status: 'paused', updated_at: new Date().toISOString() })
+        .eq('organization_id', orgId)
+        .eq('id', id);
+      throw err;
+    }
   }
 
+  console.log(`[campaigns] Campaign ${id} status set to ${status}. No email jobs queued for channel ${campaign.channel}.`);
   return campaign;
 }
 
+async function getEmailLaunchReadiness(orgId: string, campaignId: string) {
+  const { data: leads, error } = await supabase
+    .from('leads')
+    .select('id,email,status')
+    .eq('organization_id', orgId)
+    .eq('campaign_id', campaignId);
+
+  if (error) throw new AppError(500, 'Failed to inspect campaign lead readiness', error);
+
+  const rows = leads ?? [];
+  const missingEmail = rows.filter(lead => !lead.email).length;
+  const stopped = rows.filter(lead => lead.email && STOP_SEQUENCE_STATUSES.includes(lead.status)).length;
+  const ready = rows.filter(lead => lead.email && !STOP_SEQUENCE_STATUSES.includes(lead.status)).length;
+
+  return {
+    enrolled: rows.length,
+    ready,
+    missingEmail,
+    stopped,
+  };
+}
+
 async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
+  console.log(`[campaigns] Preparing initial email queue for campaign ${campaignId}`);
+
   const { data: firstStep, error: stepError } = await supabase
     .from('email_sequence_steps')
     .select('id,step_number')
@@ -294,19 +360,30 @@ async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
     .maybeSingle();
 
   if (stepError) throw new AppError(500, 'Failed to fetch first sequence step', stepError);
+  if (!firstStep) {
+    console.warn(`[campaigns] Campaign ${campaignId} has no step 1 email sequence. Jobs will still be created without a sequence_step_id.`);
+  }
 
   const { data: leads, error: leadsError } = await supabase
     .from('leads')
     .select('id,email,status')
     .eq('organization_id', orgId)
-    .eq('campaign_id', campaignId)
-    .not('email', 'is', null);
+    .eq('campaign_id', campaignId);
 
   if (leadsError) throw new AppError(500, 'Failed to fetch campaign leads', leadsError);
 
+  const enrolledLeads = leads ?? [];
   const eligibleLeads = (leads ?? []).filter(lead =>
     lead.email &&
-    !['engaged', 'meeting_booked', 'not_interested', 'unsubscribed'].includes(lead.status)
+    !STOP_SEQUENCE_STATUSES.includes(lead.status)
+  );
+  const missingEmailCount = enrolledLeads.filter(lead => !lead.email).length;
+  const stoppedCount = enrolledLeads.filter(lead =>
+    lead.email && STOP_SEQUENCE_STATUSES.includes(lead.status)
+  ).length;
+
+  console.log(
+    `[campaigns] Campaign ${campaignId} enrolled=${enrolledLeads.length}, eligible=${eligibleLeads.length}, missing_email=${missingEmailCount}, stopped_status=${stoppedCount}`
   );
 
   let queued = 0;
@@ -322,7 +399,10 @@ async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
       .maybeSingle();
 
     if (existingError) throw new AppError(500, 'Failed to check existing campaign email', existingError);
-    if (existing) continue;
+    if (existing) {
+      console.log(`[campaigns] Existing step 1 email found for campaign ${campaignId}, lead ${lead.id}. Skipping duplicate queue.`);
+      continue;
+    }
 
     const { data: message, error: messageError } = await supabase
       .from('email_messages')
@@ -341,7 +421,7 @@ async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
 
     if (messageError || !message) throw new AppError(500, 'Failed to create initial email message', messageError);
 
-    await enqueueSendEmail({
+    const job = await enqueueSendEmail({
       emailMessageId: message.id,
       organizationId: orgId,
       campaignId,
@@ -352,8 +432,17 @@ async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
     });
 
     queued++;
+    await supabase
+      .from('leads')
+      .update({ status: 'queued', updated_at: new Date().toISOString() })
+      .eq('organization_id', orgId)
+      .eq('id', lead.id)
+      .eq('status', 'new');
+
+    console.log(`[campaigns] Queued send-email job ${job.id} for message ${message.id}, lead ${lead.id}, campaign ${campaignId}`);
   }
 
+  console.log(`[campaigns] Initial queue complete for campaign ${campaignId}: ${queued} job(s) queued.`);
   return queued;
 }
 

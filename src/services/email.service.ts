@@ -176,6 +176,8 @@ export async function rejectAiDraftReply(organizationId: string, replyId: string
 }
 
 export async function sendEmail(emailMessageId: string, organizationId: string) {
+  console.log(`[send-email] Starting message ${emailMessageId} for org ${organizationId}`);
+
   const capStatus = await checkSendCap(organizationId);
   if (capStatus.paused) {
     console.log(`[send-email] Daily cap reached (${capStatus.sentToday}/${capStatus.cap}), skipping ${emailMessageId}`);
@@ -190,9 +192,15 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
     .single();
 
   if (msgError || !msg) throw new AppError(404, 'Email message not found');
+  console.log(
+    `[send-email] Loaded message ${emailMessageId}: campaign=${msg.campaign_id ?? 'none'}, lead=${msg.lead_id ?? 'none'}, step=${msg.step_number ?? 1}, status=${msg.status}`
+  );
 
   const toEmail = msg.leads?.email;
-  if (!toEmail) throw new AppError(400, 'Lead has no email address');
+  if (!toEmail) {
+    console.warn(`[send-email] Message ${emailMessageId} cannot send because lead ${msg.lead_id ?? 'unknown'} has no email address`);
+    throw new AppError(400, 'Lead has no email address');
+  }
 
   const stepNumber = msg.step_number ?? 1;
   if (stepNumber > 1 && STOP_SEQUENCE_STATUSES.includes(msg.leads?.status)) {
@@ -213,6 +221,7 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
     const leadId = msg.lead_id;
 
     if (campaignId && leadId) {
+      console.log(`[send-email] Generating email copy for message ${emailMessageId}, campaign ${campaignId}, lead ${leadId}, step ${stepNumber}`);
       const generated = await generateEmail(organizationId, { campaignId, leadId, stepNumber });
       subject = subject || generated.subject;
       body = body || generated.body;
@@ -229,6 +238,7 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
   body += UNSUBSCRIBE_FOOTER;
 
   const gmail = await getGmailCredentials(organizationId);
+  console.log(`[send-email] Sending message ${emailMessageId} to ${toEmail} from ${gmail.email}`);
 
   try {
     const result = await sendGmailMessage(
@@ -257,6 +267,8 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
       .eq('id', msg.lead_id)
       .eq('status', 'queued');
 
+    console.log(`[send-email] Sent message ${emailMessageId}. gmailMessageId=${result.messageId}, threadId=${result.threadId}`);
+
     if (msg.sequence_step_id && msg.campaign_id && msg.lead_id) {
       await enqueueNextSequenceStep({
         organizationId,
@@ -268,6 +280,7 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
 
     return { success: true, gmailMessageId: result.messageId };
   } catch (err: any) {
+    console.error(`[send-email] Failed message ${emailMessageId}: ${err.message}`);
     await supabase
       .from('email_messages')
       .update({ status: 'failed' })
@@ -302,7 +315,10 @@ async function enqueueNextSequenceStep(input: {
     .maybeSingle();
 
   if (stepError) throw new AppError(500, 'Failed to fetch next sequence step', stepError);
-  if (!nextStep) return;
+  if (!nextStep) {
+    console.log(`[send-email] No next sequence step for campaign ${campaignId}, lead ${leadId}, current step ${currentStepNumber}`);
+    return;
+  }
 
   const { data: lead, error: leadError } = await supabase
     .from('leads')
@@ -312,7 +328,10 @@ async function enqueueNextSequenceStep(input: {
     .single();
 
   if (leadError || !lead) throw new AppError(404, 'Lead not found for next sequence step', leadError);
-  if (!lead.email || STOP_SEQUENCE_STATUSES.includes(lead.status)) return;
+  if (!lead.email || STOP_SEQUENCE_STATUSES.includes(lead.status)) {
+    console.log(`[send-email] Not queueing next step for lead ${leadId}: email=${lead.email ? 'present' : 'missing'}, status=${lead.status}`);
+    return;
+  }
 
   const { data: existing, error: existingError } = await supabase
     .from('email_messages')
@@ -324,7 +343,10 @@ async function enqueueNextSequenceStep(input: {
     .maybeSingle();
 
   if (existingError) throw new AppError(500, 'Failed to check existing next sequence email', existingError);
-  if (existing) return;
+  if (existing) {
+    console.log(`[send-email] Existing next-step email found for campaign ${campaignId}, lead ${leadId}, step ${nextStep.step_number}. Skipping duplicate queue.`);
+    return;
+  }
 
   const { data: message, error: messageError } = await supabase
     .from('email_messages')
@@ -343,7 +365,7 @@ async function enqueueNextSequenceStep(input: {
 
   if (messageError || !message) throw new AppError(500, 'Failed to create next sequence email', messageError);
 
-  await enqueueSendEmail({
+  const job = await enqueueSendEmail({
     emailMessageId: message.id,
     organizationId,
     campaignId,
@@ -353,4 +375,8 @@ async function enqueueNextSequenceStep(input: {
     delay: Math.max(0, nextStep.delay_days) * 24 * 60 * 60 * 1000,
     jobId: `send-email:${message.id}`,
   });
+
+  console.log(
+    `[send-email] Queued next-step job ${job.id} for message ${message.id}, campaign ${campaignId}, lead ${leadId}, step ${nextStep.step_number}, delayDays=${nextStep.delay_days}`
+  );
 }
