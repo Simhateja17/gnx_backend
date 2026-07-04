@@ -19,7 +19,7 @@ export async function getDashboard(userId: string, orgId: string) {
     .eq('id', userId)
     .single();
 
-  const [emailsResult, repliesResult, leadsResult, campaignsResult] = await Promise.all([
+  const [emailsResult, repliesResult, leadsResult, campaignsResult, configResult] = await Promise.all([
     supabase
       .from('email_messages')
       .select('id, subject, sent_at, lead_id, leads(first_name, last_name, company)')
@@ -42,6 +42,12 @@ export async function getDashboard(userId: string, orgId: string) {
       .select('id')
       .eq('organization_id', orgId)
       .eq('status', 'active'),
+    // agent_configs may not exist yet if onboarding was skipped — default gracefully below
+    supabase
+      .from('agent_configs')
+      .select('agent_name')
+      .eq('organization_id', orgId)
+      .single(),
   ]);
 
   if (emailsResult.error) throw new AppError(500, 'Failed to fetch email data');
@@ -112,6 +118,7 @@ export async function getDashboard(userId: string, orgId: string) {
       firstName: user?.first_name ?? '',
       lastName: user?.last_name ?? '',
     },
+    agentName: configResult.data?.agent_name ?? 'Nexo',
     kpis: {
       emailsSent,
       replies: replyCount,
