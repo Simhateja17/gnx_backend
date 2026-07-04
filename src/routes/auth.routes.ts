@@ -53,7 +53,7 @@ router.post('/forgot-password', authRateLimiter, validate(forgotPasswordSchema),
   }
 });
 
-router.post('/reset-password', validate(resetPasswordSchema), async (req, res, next) => {
+router.post('/reset-password', authRateLimiter, validate(resetPasswordSchema), async (req, res, next) => {
   try {
     await authService.resetPassword(req.body);
     res.json({ ok: true });

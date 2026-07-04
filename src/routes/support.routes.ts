@@ -1,6 +1,9 @@
 import { Router } from 'express';
+import { authenticate } from '../middleware/auth.middleware';
 
 const router = Router();
+
+router.use(authenticate);
 
 // TODO: implement support tickets/messages
 router.get('/tickets', (_req, res) => res.json({ todo: 'list tickets' }));

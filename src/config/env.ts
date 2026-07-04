@@ -44,4 +44,18 @@ const envSchema = z.object({
   SENTRY_DSN: z.string().optional(),
 });
 
-export const env = envSchema.parse(process.env);
+function loadEnv(): z.infer<typeof envSchema> {
+  try {
+    return envSchema.parse(process.env);
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      const missing = err.issues.map((issue) => issue.path.join('.')).join(', ');
+      console.error(`Missing or invalid environment variables: ${missing}`);
+    } else {
+      console.error('Failed to parse environment variables:', err);
+    }
+    process.exit(1);
+  }
+}
+
+export const env = loadEnv();

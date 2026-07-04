@@ -192,3 +192,99 @@ export async function getAnalytics(orgId: string) {
     funnel,
   };
 }
+
+export async function getCampaignAnalytics(orgId: string) {
+  const { data: campaigns, error } = await supabase
+    .from('campaigns')
+    .select('id, name, channel, status')
+    .eq('organization_id', orgId);
+
+  if (error) throw new AppError(500, 'Failed to fetch campaigns');
+
+  const results = await Promise.all(
+    (campaigns ?? []).map(async (campaign) => {
+      const [enrolledResult, sentResult, repliesResult, meetingsResult] = await Promise.all([
+        supabase
+          .from('leads')
+          .select('id', { count: 'exact', head: true })
+          .eq('campaign_id', campaign.id),
+        supabase
+          .from('email_messages')
+          .select('id', { count: 'exact', head: true })
+          .eq('campaign_id', campaign.id)
+          .eq('status', 'sent'),
+        supabase
+          .from('email_replies')
+          .select('id, email_messages!inner(campaign_id)', { count: 'exact', head: true })
+          .eq('email_messages.campaign_id', campaign.id),
+        supabase
+          .from('leads')
+          .select('id', { count: 'exact', head: true })
+          .eq('campaign_id', campaign.id)
+          .eq('status', 'meeting_booked'),
+      ]);
+
+      const enrolled = enrolledResult.count ?? 0;
+      const sent = sentResult.count ?? 0;
+      const replies = repliesResult.count ?? 0;
+      const meetings = meetingsResult.count ?? 0;
+
+      return {
+        campaignId: campaign.id,
+        name: campaign.name,
+        channel: campaign.channel,
+        status: campaign.status,
+        enrolled,
+        sent,
+        replies,
+        meetings,
+        replyRate: sent > 0 ? ((replies / sent) * 100).toFixed(1) : '0',
+      };
+    })
+  );
+
+  return { campaigns: results };
+}
+
+export async function getCallAnalytics(orgId: string) {
+  const { data: calls, error } = await supabase
+    .from('calls')
+    .select('id, status, disposition, campaign_id, campaigns(name)')
+    .eq('organization_id', orgId);
+
+  if (error) throw new AppError(500, 'Failed to fetch calls');
+
+  const rows = calls ?? [];
+  const totalCalls = rows.length;
+  const answered = rows.filter(c => !['queued', 'failed', 'no_answer'].includes(c.status)).length;
+  const meetingsBooked = rows.filter(c => c.disposition === 'meeting_booked').length;
+  const voicemail = rows.filter(c => c.status === 'voicemail').length;
+  const failed = rows.filter(c => c.status === 'failed').length;
+
+  const byCampaign = new Map<string, { campaignId: string; name: string; calls: number; meetings: number }>();
+  for (const call of rows) {
+    if (!call.campaign_id) continue;
+    const campaign = call.campaigns as any;
+    const entry = byCampaign.get(call.campaign_id) ?? {
+      campaignId: call.campaign_id,
+      name: campaign?.name ?? 'Unknown',
+      calls: 0,
+      meetings: 0,
+    };
+    entry.calls += 1;
+    if (call.disposition === 'meeting_booked') entry.meetings += 1;
+    byCampaign.set(call.campaign_id, entry);
+  }
+
+  return {
+    summary: {
+      totalCalls,
+      answered,
+      answerRate: totalCalls > 0 ? ((answered / totalCalls) * 100).toFixed(1) : '0',
+      meetingsBooked,
+      voicemail,
+      failed,
+    },
+    campaigns: Array.from(byCampaign.values()),
+  };
+}

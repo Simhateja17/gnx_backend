@@ -3,6 +3,7 @@ import { retell } from '../lib/retell';
 import { supabase } from '../lib/supabase';
 import { generateVoicePrompt } from './ai.service';
 import { enqueueScheduleCall } from '../jobs/schedule-call.job';
+import { posthog } from '../lib/posthog';
 import { AppError } from '../types';
 import { env } from '../config/env';
 
@@ -174,7 +175,7 @@ export async function handleRetellWebhook(rawBody: Buffer, signature: string) {
 
   const { data: callRecord } = await supabase
     .from('calls')
-    .select('id, lead_id')
+    .select('id, lead_id, organization_id, campaign_id')
     .eq('retell_call_id', call.call_id)
     .single();
 
@@ -193,6 +194,12 @@ export async function handleRetellWebhook(rawBody: Buffer, signature: string) {
       status: isVoicemail ? 'voicemail' : 'completed',
       ended_at: call.end_timestamp ? new Date(call.end_timestamp).toISOString() : new Date().toISOString(),
     }).eq('id', callRecord.id);
+
+    posthog?.capture({
+      distinctId: callRecord.organization_id,
+      event: 'call_completed',
+      properties: { callId: callRecord.id, campaignId: callRecord.campaign_id, leadId: callRecord.lead_id, voicemail: isVoicemail },
+    });
   }
 
   if (event === 'call_analyzed') {
@@ -206,6 +213,12 @@ export async function handleRetellWebhook(rawBody: Buffer, signature: string) {
 
     if (disposition === 'meeting_booked') {
       await supabase.from('leads').update({ status: 'meeting_booked' }).eq('id', callRecord.lead_id);
+
+      posthog?.capture({
+        distinctId: callRecord.organization_id,
+        event: 'meeting_booked',
+        properties: { callId: callRecord.id, campaignId: callRecord.campaign_id, leadId: callRecord.lead_id, source: 'voice' },
+      });
     }
   }
 }
