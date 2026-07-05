@@ -32,12 +32,13 @@ function getOrgId(req: AuthenticatedRequest) {
 
 router.get('/', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
-    const { search, status, source, page, perPage } = req.query as Record<string, string | undefined>;
-    if (search || status || source || page || perPage) {
+    const { search, status, source, campaignId, page, perPage } = req.query as Record<string, string | undefined>;
+    if (search || status || source || campaignId || page || perPage) {
       res.json(await listLeadsFiltered(getOrgId(req), {
         search,
         status,
         source,
+        campaignId,
         page: page ? parseInt(page, 10) : undefined,
         perPage: perPage ? parseInt(perPage, 10) : undefined,
       }));

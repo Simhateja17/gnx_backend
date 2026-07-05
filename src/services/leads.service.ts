@@ -372,6 +372,7 @@ export async function listLeadsFiltered(orgId: string, filters: {
   search?: string;
   status?: string;
   source?: string;
+  campaignId?: string;
   page?: number;
   perPage?: number;
 }) {
@@ -390,6 +391,9 @@ export async function listLeadsFiltered(orgId: string, filters: {
   }
   if (filters.source) {
     query = query.eq('source', filters.source);
+  }
+  if (filters.campaignId) {
+    query = query.eq('campaign_id', filters.campaignId);
   }
   if (filters.search) {
     const term = `%${filters.search}%`;
