@@ -1,5 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { enqueueSendEmail } from '../jobs/send-email.job';
+import { enqueueScheduleCall } from '../jobs/schedule-call.job';
+import { posthog } from '../lib/posthog';
 import { AppError } from '../types';
 import type { AssignLeadsInput, CampaignCreateInput, CampaignUpdateInput, SequenceStepsUpsertInput } from '../schemas/campaigns.schema';
 
@@ -308,6 +310,14 @@ export async function setCampaignStatus(
   const stats = await getStatsByCampaign(orgId, [id]);
   const campaign = toApiCampaign(data as unknown as CampaignRow, stats.get(id));
 
+  if (status === 'active') {
+    posthog?.capture({
+      distinctId: orgId,
+      event: 'campaign_launched',
+      properties: { campaignId: id, channel: campaign.channel },
+    });
+  }
+
   if (status === 'active' && campaign.channel === 'email') {
     try {
       const queued = await enqueueInitialEmailStep(orgId, id);
@@ -323,8 +333,59 @@ export async function setCampaignStatus(
     }
   }
 
+  if (status === 'active' && campaign.channel === 'voice') {
+    const result = await enqueueVoiceCalls(orgId, id, campaign);
+    return { ...campaign, ...result };
+  }
+
   console.log(`[campaigns] Campaign ${id} status set to ${status}. No email jobs queued for channel ${campaign.channel}.`);
   return campaign;
+}
+
+async function enqueueVoiceCalls(
+  orgId: string,
+  campaignId: string,
+  campaign: ReturnType<typeof toApiCampaign>,
+) {
+  const { data: agentConfig } = await supabase
+    .from('agent_configs')
+    .select('retell_phone_number')
+    .eq('organization_id', orgId)
+    .single();
+
+  if (!agentConfig?.retell_phone_number) {
+    throw new AppError(400, 'Add your Retell phone number in Settings before launching a voice campaign');
+  }
+
+  const fromNumber = agentConfig.retell_phone_number;
+
+  const { data: leads, error: leadsError } = await supabase
+    .from('leads')
+    .select('id, phone, status')
+    .eq('organization_id', orgId)
+    .eq('campaign_id', campaignId)
+    .not('phone', 'is', null);
+
+  if (leadsError) throw new AppError(500, 'Failed to fetch campaign leads', leadsError);
+
+  const eligibleLeads = (leads ?? []).filter(
+    lead => lead.phone && !['meeting_booked', 'not_interested', 'unsubscribed'].includes(lead.status),
+  );
+
+  const skipped = (leads?.length ?? 0) - eligibleLeads.length;
+  const msPerCall = Math.floor(3_600_000 / (campaign.callCadencePerHour || 5));
+  let queued = 0;
+
+  for (let i = 0; i < eligibleLeads.length; i++) {
+    const lead = eligibleLeads[i];
+    await enqueueScheduleCall(
+      { leadId: lead.id, campaignId, organizationId: orgId, fromNumber, toNumber: lead.phone! },
+      i * msPerCall,
+    );
+    queued++;
+  }
+
+  return { queued, skipped };
 }
 
 async function getEmailLaunchReadiness(orgId: string, campaignId: string) {

@@ -49,7 +49,13 @@ router.get('/usage', async (req: AuthenticatedRequest, res: Response, next: Next
   }
 });
 
-router.post('/checkout', (_req, res) => res.json({ todo: 'create checkout session' }));
-router.post('/portal', (_req, res) => res.json({ todo: 'create portal session' }));
+router.post('/checkout', (_req, res) => res.json({
+  status: 'coming_soon',
+  message: 'Billing is launching soon — you have full access during early access.',
+}));
+router.post('/portal', (_req, res) => res.json({
+  status: 'coming_soon',
+  message: 'The billing portal is launching soon — reach out to support for plan changes in the meantime.',
+}));
 
 export default router;

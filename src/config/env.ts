@@ -13,35 +13,49 @@ const envSchema = z.object({
   COOKIE_SECRET: z.string(),
   COOKIE_DOMAIN: z.string().optional(),
 
-  GOOGLE_CLIENT_ID: z.string(),
-  GOOGLE_CLIENT_SECRET: z.string(),
-  GOOGLE_REDIRECT_URI: z.string().url(),
+  GOOGLE_CLIENT_ID: z.string().default(''),
+  GOOGLE_CLIENT_SECRET: z.string().default(''),
+  GOOGLE_REDIRECT_URI: z.string().default('http://localhost:5000/api/gmail/callback'),
 
-  AZURE_OPENAI_ENDPOINT: z.string().url(),
-  AZURE_OPENAI_API_KEY: z.string(),
+  AZURE_OPENAI_ENDPOINT: z.string().default(''),
+  AZURE_OPENAI_API_KEY: z.string().default(''),
   AZURE_OPENAI_API_VERSION: z.string().default('2025-04-01-preview'),
   AZURE_OPENAI_CHAT_DEPLOYMENT: z.string().default('gpt-5.4-mini'),
 
-  RETELL_API_KEY: z.string(),
-  RETELL_WEBHOOK_SECRET: z.string(),
+  RETELL_API_KEY: z.string().default(''),
+  RETELL_WEBHOOK_SECRET: z.string().default(''),
 
-  APOLLO_API_KEY: z.string(),
+  APOLLO_API_KEY: z.string().default(''),
 
-  STRIPE_SECRET_KEY: z.string(),
-  STRIPE_WEBHOOK_SECRET: z.string(),
-  STRIPE_PRICE_STARTER: z.string(),
-  STRIPE_PRICE_GROWTH: z.string(),
-  STRIPE_PRICE_SCALE: z.string(),
+  STRIPE_SECRET_KEY: z.string().default(''),
+  STRIPE_WEBHOOK_SECRET: z.string().default(''),
+  STRIPE_PRICE_STARTER: z.string().default(''),
+  STRIPE_PRICE_GROWTH: z.string().default(''),
+  STRIPE_PRICE_SCALE: z.string().default(''),
 
-  RESEND_API_KEY: z.string(),
-  RESEND_FROM_EMAIL: z.string().email(),
+  RESEND_API_KEY: z.string().default(''),
+  RESEND_FROM_EMAIL: z.string().default('noreply@globonexo.com'),
 
   REDIS_URL: z.string().default('redis://localhost:6379'),
 
   POSTHOG_API_KEY: z.string().optional(),
-  POSTHOG_HOST: z.string().url().optional(),
+  POSTHOG_HOST: z.string().optional(),
 
   SENTRY_DSN: z.string().optional(),
 });
 
-export const env = envSchema.parse(process.env);
+function loadEnv(): z.infer<typeof envSchema> {
+  try {
+    return envSchema.parse(process.env);
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      const missing = err.issues.map((issue) => issue.path.join('.')).join(', ');
+      console.error(`Missing or invalid environment variables: ${missing}`);
+    } else {
+      console.error('Failed to parse environment variables:', err);
+    }
+    process.exit(1);
+  }
+}
+
+export const env = loadEnv();
