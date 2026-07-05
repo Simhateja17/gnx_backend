@@ -18,6 +18,7 @@ export const redisConnection = {
   host:                 parsed.hostname,
   port:                 Number(parsed.port) || 6379,
   password:             parsed.password || undefined,
+  tls:                  parsed.protocol === 'rediss:' ? {} : undefined,
   maxRetriesPerRequest: null as null,
   enableReadyCheck:     false,
 };

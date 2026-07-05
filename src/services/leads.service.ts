@@ -289,24 +289,49 @@ export async function searchApollo(orgId: string, input: ApolloSearchInput) {
   };
 }
 
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const URL_PATTERN = /^https?:\/\//i;
+
 export async function uploadCsvLeads(orgId: string, input: CsvUploadInput) {
-  const records = input.rows.map(row => toLeadRecord(
-    orgId,
-    {
-      campaignId: input.campaignId,
-      source: 'csv',
-      firstName: row.firstName,
-      lastName: row.lastName,
-      name: row.name,
-      title: row.title,
-      company: row.company,
-      email: row.email,
-      phone: row.phone,
-      location: row.location,
-      linkedinUrl: row.linkedinUrl,
-    },
-    row.rawData
-  ));
+  const records: ReturnType<typeof toLeadRecord>[] = [];
+  const errors: Array<{ row: number; message: string }> = [];
+
+  input.rows.forEach((row, index) => {
+    if (row.email && !EMAIL_PATTERN.test(row.email)) {
+      errors.push({ row: index + 1, message: `Invalid email format: "${row.email}"` });
+      return;
+    }
+    if (row.linkedinUrl && !URL_PATTERN.test(row.linkedinUrl)) {
+      errors.push({ row: index + 1, message: `Invalid LinkedIn URL: "${row.linkedinUrl}"` });
+      return;
+    }
+    if (!row.name && !row.firstName && !row.lastName && !row.email && !row.company) {
+      errors.push({ row: index + 1, message: 'Row has no identifiable data (no name, email, or company)' });
+      return;
+    }
+
+    records.push(toLeadRecord(
+      orgId,
+      {
+        campaignId: input.campaignId,
+        source: 'csv',
+        firstName: row.firstName,
+        lastName: row.lastName,
+        name: row.name,
+        title: row.title,
+        company: row.company,
+        email: row.email,
+        phone: row.phone,
+        location: row.location,
+        linkedinUrl: row.linkedinUrl,
+      },
+      row.rawData
+    ));
+  });
+
+  if (records.length === 0) {
+    return { inserted: 0, skipped: errors.length, errors, items: [] };
+  }
 
   const { data, error } = await supabase
     .from('leads')
@@ -317,6 +342,8 @@ export async function uploadCsvLeads(orgId: string, input: CsvUploadInput) {
 
   return {
     inserted: data?.length ?? 0,
+    skipped: errors.length,
+    errors,
     items: ((data ?? []) as unknown as LeadRow[]).map(toApiLead),
   };
 }
@@ -423,6 +450,7 @@ export async function listLeadsFiltered(orgId: string, filters: {
   search?: string;
   status?: string;
   source?: string;
+  campaignId?: string;
   page?: number;
   perPage?: number;
 }) {
@@ -441,6 +469,9 @@ export async function listLeadsFiltered(orgId: string, filters: {
   }
   if (filters.source) {
     query = query.eq('source', filters.source);
+  }
+  if (filters.campaignId) {
+    query = query.eq('campaign_id', filters.campaignId);
   }
   if (filters.search) {
     const term = `%${filters.search}%`;

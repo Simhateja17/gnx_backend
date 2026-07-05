@@ -105,9 +105,10 @@ export async function getDashboard(userId: string, orgId: string) {
       .select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId)
       .eq('status', 'queued'),
+    // agent_configs may not exist yet if onboarding was skipped — default gracefully below
     supabase
       .from('agent_configs')
-      .select('meeting_target, booking_link')
+      .select('agent_name, meeting_target, booking_link')
       .eq('organization_id', orgId)
       .maybeSingle(),
     supabase
@@ -267,6 +268,7 @@ export async function getDashboard(userId: string, orgId: string) {
       firstName: userResult.data?.first_name ?? '',
       lastName: userResult.data?.last_name ?? '',
     },
+    agentName: agentResult.data?.agent_name ?? 'Nexo',
     kpis: {
       emailsSent,
       replies: replyCount,
