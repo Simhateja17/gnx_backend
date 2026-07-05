@@ -75,6 +75,18 @@ export async function pollInbox(organizationId: string, connectedAccountId: stri
         const msgId = message.id;
         if (!msgId || ourIds.has(msgId) || knownIds.has(msgId)) continue;
 
+        // Belt-and-suspenders check alongside ourIds: if the connected
+        // account emails itself (e.g. testing with your own address as the
+        // lead), Gmail delivers a copy to the inbox too. Relying only on
+        // ourIds risks a race against the send's own DB write recording
+        // gmail_message_id, which would let our own outbound message (and
+        // its CAN-SPAM unsubscribe footer text) be misread as an incoming
+        // reply and falsely trigger unsubscribe detection.
+        const fromAddress = extractFromAddress(message);
+        if (fromAddress && account.provider_account_id && fromAddress.toLowerCase() === String(account.provider_account_id).toLowerCase()) {
+          continue;
+        }
+
         const body = extractPlainTextBody(message);
         if (!body) continue;
 
@@ -193,6 +205,16 @@ async function saveAiDraftReply(input: {
 
 function isUnsubscribeReply(body: string) {
   return UNSUBSCRIBE_PATTERNS.some(pattern => pattern.test(body));
+}
+
+function extractFromAddress(message: any): string | null {
+  const headers = message.payload?.headers ?? [];
+  const fromHeader = headers.find((h: any) => h.name?.toLowerCase() === 'from')?.value;
+  if (!fromHeader) return null;
+
+  // "From" headers look like `"Name" <email@example.com>` or just `email@example.com`.
+  const match = fromHeader.match(/<([^>]+)>/);
+  return (match ? match[1] : fromHeader).trim();
 }
 
 function extractPlainTextBody(message: any): string | null {
