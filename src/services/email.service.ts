@@ -218,12 +218,18 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
   }
 
   const stepNumber = msg.step_number ?? 1;
-  if (stepNumber > 1 && STOP_SEQUENCE_STATUSES.includes(msg.leads?.status)) {
+  // Only genuine automated sequence steps (step 2/3 follow-ups) carry a
+  // sequence_step_id - these two guards exist to stop those follow-ups once
+  // a lead has responded or the campaign's been paused. An approved reply
+  // reuses a step_number > 1 just to satisfy the DB's uniqueness constraint,
+  // but it's a direct human-approved send, not a stale automated follow-up,
+  // so it must never be silently skipped by either check.
+  if (msg.sequence_step_id && STOP_SEQUENCE_STATUSES.includes(msg.leads?.status)) {
     await markEmailSkipped(emailMessageId);
     return { success: false, reason: 'sequence_stopped', leadStatus: msg.leads?.status };
   }
 
-  if (stepNumber > 1 && msg.campaigns?.status !== 'active') {
+  if (msg.sequence_step_id && msg.campaigns?.status !== 'active') {
     await markEmailSkipped(emailMessageId);
     return { success: false, reason: 'campaign_not_active', campaignStatus: msg.campaigns?.status };
   }
