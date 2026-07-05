@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { enqueueSendEmail } from '../jobs/send-email.job';
 import { generateReply } from './ai.service';
 import { AppError } from '../types';
+import { env } from '../config/env';
 
 const UNSUBSCRIBE_PATTERNS = [
   /\bunsubscribe\b/i,
@@ -14,7 +15,7 @@ const UNSUBSCRIBE_PATTERNS = [
 ];
 
 function createOAuth2Client(accessToken: string, refreshToken: string) {
-  const oauth2 = new google.auth.OAuth2();
+  const oauth2 = new google.auth.OAuth2(env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REDIRECT_URI);
   oauth2.setCredentials({ access_token: accessToken, refresh_token: refreshToken });
   return oauth2;
 }
@@ -75,7 +76,9 @@ export async function pollInbox(organizationId: string, connectedAccountId: stri
         const msgId = message.id;
         if (!msgId || ourIds.has(msgId) || knownIds.has(msgId)) continue;
 
-        const body = extractPlainTextBody(message);
+        const rawBody = extractPlainTextBody(message);
+        if (!rawBody) continue;
+        const body = stripQuotedText(rawBody);
         if (!body) continue;
 
         const { data: originalMsg } = await supabase
@@ -186,13 +189,28 @@ async function saveAiDraftReply(input: {
       campaignId: originalMessage.campaign_id ?? undefined,
       leadId: originalMessage.lead_id,
     }, {
-      jobId: `send-email:${replyMessageId}`,
+      jobId: `send-email-${replyMessageId}`,
     });
   }
 }
 
 function isUnsubscribeReply(body: string) {
   return UNSUBSCRIBE_PATTERNS.some(pattern => pattern.test(body));
+}
+
+// Plain-text replies include the entire original message quoted below the
+// new text (lines starting with '>', preceded by an 'On ... wrote:' line).
+// Since every outbound email includes a CAN-SPAM 'reply "unsubscribe"'
+// footer, leaving the quote in would make isUnsubscribeReply (and the AI
+// reply-draft context) see that footer as if the prospect wrote it,
+// misreading every single reply as an unsubscribe request.
+function stripQuotedText(body: string): string {
+  const lines = body.split(/\r?\n/);
+  const quoteStartIndex = lines.findIndex(
+    line => /^>/.test(line.trim()) || /^On .+wrote:\s*$/.test(line.trim())
+  );
+  const kept = quoteStartIndex === -1 ? lines : lines.slice(0, quoteStartIndex);
+  return kept.join('\n').trim();
 }
 
 function extractPlainTextBody(message: any): string | null {

@@ -1,7 +1,7 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
 import { supabase } from '../lib/supabase';
-import { enqueueRecurringPollInbox } from '../jobs/poll-inbox.job';
+import { enqueueRecurringPollInbox, removeRecurringPollInbox } from '../jobs/poll-inbox.job';
 import { getAuthUrl, exchangeCode, createOAuth2Client } from '../lib/gmail';
 import { google } from 'googleapis';
 import { AppError } from '../types';
@@ -120,6 +120,8 @@ router.delete('/disconnect', async (req: AuthenticatedRequest, res: Response, ne
 
     if (error) throw new AppError(500, 'Failed to disconnect Gmail', error);
     if (!data) throw new AppError(404, 'No Gmail connection found');
+
+    await removeRecurringPollInbox(data.id);
 
     res.json({ success: true });
   } catch (err) {
