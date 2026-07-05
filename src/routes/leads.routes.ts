@@ -59,7 +59,7 @@ router.post('/', validate(leadCreateSchema), async (req: AuthenticatedRequest, r
 
 router.post('/apollo-search', validate(apolloSearchSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
-    res.json(await searchApollo(req.body));
+    res.json(await searchApollo(getOrgId(req), req.body));
   } catch (err) {
     next(err);
   }

@@ -18,6 +18,7 @@ export const leadCreateSchema = z.object({
 });
 
 export const apolloSearchSchema = z.object({
+  campaignId: z.string().uuid().optional(),
   titles: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
   locations: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
   companySizes: z.array(z.string().trim().min(1).max(40)).max(12).default([]),

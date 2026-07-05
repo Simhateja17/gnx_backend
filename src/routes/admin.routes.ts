@@ -1,17 +1,65 @@
-import { Router } from 'express';
-import { authenticate, requireAdmin } from '../middleware/auth.middleware';
+import { Router, Response, NextFunction } from 'express';
+import { authenticate, AuthenticatedRequest, requireAdmin } from '../middleware/auth.middleware';
+import * as adminService from '../services/admin.service';
 
 const router = Router();
 
-router.use(authenticate);
-router.use(requireAdmin);
+router.use(authenticate, requireAdmin);
 
-// TODO: implement admin endpoints
-router.get('/organizations', (_req, res) => res.json({ todo: 'list organizations' }));
-router.get('/users', (_req, res) => res.json({ todo: 'list users' }));
-router.get('/campaigns', (_req, res) => res.json({ todo: 'list campaigns' }));
-router.get('/metrics', (_req, res) => res.json({ todo: 'admin metrics' }));
-router.post('/organizations/:id/suspend', (req, res) => res.json({ todo: 'suspend org', id: req.params.id }));
-router.post('/organizations/:id/impersonate', (req, res) => res.json({ todo: 'impersonate org', id: req.params.id }));
+router.get('/overview', async (_req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await adminService.getAdminOverview());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/organizations', async (_req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await adminService.listOrganizations());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/users', async (_req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await adminService.listUsers());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/campaigns', async (_req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await adminService.listCampaigns());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/metrics', async (_req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await adminService.getMetrics());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/organizations/:id/suspend', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await adminService.suspendOrganization(req.params.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/organizations/:id/impersonate', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await adminService.createImpersonationToken(req.params.id, req.user.id));
+  } catch (err) {
+    next(err);
+  }
+});
 
 export default router;
