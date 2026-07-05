@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { redis } from '../lib/redis';
 import { AppError } from '../types';
 import { mapRow } from '../lib/csv-parser';
+import { enqueueInitialEmailStepIfActive } from './campaigns.service';
 import type { ApolloEnrichInput, ApolloSearchInput, CsvUploadInput, LeadCreateInput } from '../schemas/leads.schema';
 import type { CsvImportJobData, CsvImportProgress } from '../jobs/csv-import.job';
 
@@ -166,6 +167,11 @@ export async function createLead(orgId: string, input: LeadCreateInput) {
     .single();
 
   if (error) throw new AppError(500, 'Failed to create lead', error);
+
+  if (input.campaignId) {
+    await enqueueInitialEmailStepIfActive(orgId, input.campaignId);
+  }
+
   return toApiLead(data as unknown as LeadRow);
 }
 
@@ -236,6 +242,11 @@ async function saveApolloPeople(orgId: string, input: ApolloSearchInput, people:
     .select(LEAD_COLUMNS);
 
   if (error) throw new AppError(500, 'Failed to save Apollo leads', error);
+
+  if (input.campaignId && (data?.length ?? 0) > 0) {
+    await enqueueInitialEmailStepIfActive(orgId, input.campaignId);
+  }
+
   return {
     saved: ((data ?? []) as unknown as LeadRow[]).map(toApiLead),
     inserted: data?.length ?? 0,
@@ -339,6 +350,10 @@ export async function uploadCsvLeads(orgId: string, input: CsvUploadInput) {
     .select(LEAD_COLUMNS);
 
   if (error) throw new AppError(500, 'Failed to upload CSV leads', error);
+
+  if (input.campaignId && (data?.length ?? 0) > 0) {
+    await enqueueInitialEmailStepIfActive(orgId, input.campaignId);
+  }
 
   return {
     inserted: data?.length ?? 0,
