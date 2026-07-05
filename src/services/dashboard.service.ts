@@ -43,20 +43,20 @@ export async function getDashboard(userId: string, orgId: string) {
       .single(),
     supabase
       .from('email_messages')
-      .select('id, subject, status, sent_at, created_at, lead_id, leads(first_name, last_name, company)')
+      .select('id, subject, status, sent_at, created_at, lead_id, leads(name, first_name, last_name, company)')
       .eq('organization_id', orgId)
       .eq('status', 'sent')
       .order('sent_at', { ascending: false, nullsFirst: false })
       .limit(10),
     supabase
       .from('email_replies')
-      .select('id, body, ai_draft_status, received_at, lead_id, leads(first_name, last_name, company)')
+      .select('id, body, ai_draft_status, received_at, lead_id, leads(name, first_name, last_name, company)')
       .eq('organization_id', orgId)
       .order('received_at', { ascending: false })
       .limit(10),
     supabase
       .from('leads')
-      .select('id, first_name, last_name, company, updated_at')
+      .select('id, name, first_name, last_name, company, updated_at')
       .eq('organization_id', orgId)
       .eq('status', 'meeting_booked')
       .order('updated_at', { ascending: false })
@@ -119,7 +119,7 @@ export async function getDashboard(userId: string, orgId: string) {
       .maybeSingle(),
     supabase
       .from('meetings')
-      .select('id, title, scheduled_at, duration_minutes, join_url, leads(first_name, last_name, title, company)')
+      .select('id, title, scheduled_at, duration_minutes, join_url, leads(name, first_name, last_name, title, company)')
       .eq('organization_id', orgId)
       .eq('status', 'scheduled')
       .gte('scheduled_at', now.toISOString())
@@ -179,7 +179,7 @@ export async function getDashboard(userId: string, orgId: string) {
 
   for (const email of emails) {
     const lead = email.leads as any;
-    const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || 'Unknown';
+    const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || lead?.name || 'Unknown';
     const company = lead?.company || '';
     const time = email.sent_at ?? email.created_at;
     activity.push({
@@ -193,7 +193,7 @@ export async function getDashboard(userId: string, orgId: string) {
 
   for (const reply of replies) {
     const lead = reply.leads as any;
-    const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || 'Unknown';
+    const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || lead?.name || 'Unknown';
     const company = lead?.company || '';
     activity.push({
       type: 'reply',
@@ -205,7 +205,7 @@ export async function getDashboard(userId: string, orgId: string) {
   }
 
   for (const lead of meetingActivity) {
-    const name = [lead.first_name, lead.last_name].filter(Boolean).join(' ') || 'Unknown';
+    const name = [lead.first_name, lead.last_name].filter(Boolean).join(' ') || lead.name || 'Unknown';
     activity.push({
       type: 'meeting',
       text: `Meeting booked with ${name}${lead.company ? ` · ${lead.company}` : ''}`,
@@ -294,7 +294,7 @@ export async function getDashboard(userId: string, orgId: string) {
       durationMinutes: nextMeeting.duration_minutes,
       joinUrl: nextMeeting.join_url,
       attendee: {
-        name: [nextMeetingLead?.first_name, nextMeetingLead?.last_name].filter(Boolean).join(' ') || 'Guest',
+        name: [nextMeetingLead?.first_name, nextMeetingLead?.last_name].filter(Boolean).join(' ') || nextMeetingLead?.name || 'Guest',
         title: nextMeetingLead?.title ?? '',
         company: nextMeetingLead?.company ?? '',
       },

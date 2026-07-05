@@ -13,7 +13,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response, next: NextFunct
 
     let query = supabase
       .from('calls')
-      .select('*, leads(first_name, last_name, company), campaigns(name)')
+      .select('*, leads(name, first_name, last_name, company), campaigns(name)')
       .eq('organization_id', req.organization.id)
       .order('created_at', { ascending: false })
       .limit(100);
