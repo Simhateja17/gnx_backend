@@ -66,6 +66,18 @@ export async function checkSendCap(organizationId: string) {
   };
 }
 
+// email_messages has a unique index on (campaign_id, lead_id, step_number),
+// meant to stop the same sequence step being sent twice. A reply isn't a
+// sequence step at all, but it still has to satisfy that constraint - reusing
+// step_number 1 collides with the lead's original campaign email every time,
+// so this finds the next free number for that lead/campaign pair instead.
+export async function getNextStepNumber(leadId: string, campaignId: string | null) {
+  let query = supabase.from('email_messages').select('step_number').eq('lead_id', leadId);
+  query = campaignId ? query.eq('campaign_id', campaignId) : query.is('campaign_id', null);
+  const { data } = await query.order('step_number', { ascending: false }).limit(1);
+  return (data?.[0]?.step_number ?? 0) + 1;
+}
+
 export async function approveAiDraftReply(organizationId: string, replyId: string, editedBody?: string) {
   const { data: reply, error } = await supabase
     .from('email_replies')
@@ -83,13 +95,15 @@ export async function approveAiDraftReply(organizationId: string, replyId: strin
     ? originalMessage.subject
     : `Re: ${originalMessage?.subject || 'Your message'}`;
 
+  const nextStepNumber = await getNextStepNumber(reply.lead_id, originalMessage?.campaign_id ?? null);
+
   const { data: queued, error: queueError } = await supabase
     .from('email_messages')
     .insert({
       organization_id: organizationId,
       campaign_id: originalMessage?.campaign_id ?? null,
       lead_id: reply.lead_id,
-      step_number: 1,
+      step_number: nextStepNumber,
       subject,
       body: approvedBody,
       gmail_thread_id: originalMessage?.gmail_thread_id ?? null,

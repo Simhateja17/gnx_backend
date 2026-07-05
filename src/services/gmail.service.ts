@@ -2,6 +2,7 @@ import { google } from 'googleapis';
 import { supabase } from '../lib/supabase';
 import { enqueueSendEmail } from '../jobs/send-email.job';
 import { generateReply } from './ai.service';
+import { getNextStepNumber } from './email.service';
 import { AppError } from '../types';
 import { env } from '../config/env';
 
@@ -153,6 +154,7 @@ async function saveAiDraftReply(input: {
     const subject = originalMessage.subject?.toLowerCase().startsWith('re:')
       ? originalMessage.subject
       : `Re: ${originalMessage.subject || 'Your message'}`;
+    const nextStepNumber = await getNextStepNumber(originalMessage.lead_id, originalMessage.campaign_id);
 
     const { data: replyMessage, error: messageError } = await supabase
       .from('email_messages')
@@ -160,7 +162,7 @@ async function saveAiDraftReply(input: {
         organization_id: organizationId,
         campaign_id: originalMessage.campaign_id,
         lead_id: originalMessage.lead_id,
-        step_number: 1,
+        step_number: nextStepNumber,
         subject,
         body: generated.body,
         gmail_thread_id: originalMessage.gmail_thread_id,
