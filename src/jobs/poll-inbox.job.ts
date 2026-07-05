@@ -22,3 +22,10 @@ export async function enqueueRecurringPollInbox(data: PollInboxJobData) {
     repeat: { every: 3 * 60 * 1000 },
   });
 }
+
+export async function removeRecurringPollInbox(connectedAccountId: string) {
+  return pollInboxQueue.removeRepeatable('poll-inbox', {
+    every: 3 * 60 * 1000,
+    jobId: `poll-inbox:${connectedAccountId}`,
+  });
+}
