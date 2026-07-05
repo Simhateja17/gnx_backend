@@ -1,6 +1,7 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest, requireAdmin } from '../middleware/auth.middleware';
 import * as adminService from '../services/admin.service';
+import { setImpersonationCookie } from '../lib/cookies';
 
 const router = Router();
 
@@ -56,7 +57,9 @@ router.post('/organizations/:id/suspend', async (req: AuthenticatedRequest, res:
 
 router.post('/organizations/:id/impersonate', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
-    res.json(await adminService.createImpersonationToken(req.params.id, req.user.id));
+    const token = await adminService.createImpersonationToken(req.params.id, req.user.id);
+    setImpersonationCookie(res, token);
+    res.json(token);
   } catch (err) {
     next(err);
   }

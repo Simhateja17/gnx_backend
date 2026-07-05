@@ -114,7 +114,7 @@ export async function approveAiDraftReply(organizationId: string, replyId: strin
     campaignId: originalMessage?.campaign_id ?? undefined,
     leadId: reply.lead_id,
   }, {
-    jobId: `send-email:${queued.id}`,
+    jobId: `send-email-${queued.id}`,
   });
 
   return {
@@ -373,7 +373,7 @@ async function enqueueNextSequenceStep(input: {
     stepNumber: nextStep.step_number,
   }, {
     delay: Math.max(0, nextStep.delay_days) * 24 * 60 * 60 * 1000,
-    jobId: `send-email:${message.id}`,
+    jobId: `send-email-${message.id}`,
   });
 
   console.log(

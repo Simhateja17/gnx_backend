@@ -8,6 +8,7 @@ interface Session {
 }
 
 const REFRESH_TOKEN_MAX_AGE = 30 * 24 * 60 * 60 * 1000; // 30 days
+const IMPERSONATION_MAX_AGE = 15 * 60 * 1000; // 15 minutes
 
 function baseCookieOptions(): CookieOptions {
   return {
@@ -35,4 +36,12 @@ export function clearAuthCookies(res: Response) {
   const options = baseCookieOptions();
   res.clearCookie('access_token', options);
   res.clearCookie('refresh_token', options);
+  res.clearCookie('impersonation_token', options);
+}
+
+export function setImpersonationCookie(res: Response, payload: Record<string, unknown>) {
+  res.cookie('impersonation_token', Buffer.from(JSON.stringify(payload)).toString('base64url'), {
+    ...baseCookieOptions(),
+    maxAge: IMPERSONATION_MAX_AGE,
+  });
 }

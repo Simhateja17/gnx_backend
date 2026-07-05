@@ -186,7 +186,7 @@ async function saveAiDraftReply(input: {
       campaignId: originalMessage.campaign_id ?? undefined,
       leadId: originalMessage.lead_id,
     }, {
-      jobId: `send-email:${replyMessageId}`,
+      jobId: `send-email-${replyMessageId}`,
     });
   }
 }

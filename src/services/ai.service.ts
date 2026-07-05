@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { env } from '../config/env';
 import { AppError } from '../types';
 import { withRetry } from '../lib/retry';
+import { ensureAgentConfig } from './agent-config.service';
 import { GenerateEmailInput, GenerateReplyInput, GenerateVoicePromptInput } from '../schemas/ai.schema';
 import { z } from 'zod';
 
@@ -151,17 +152,15 @@ ${lead.linkedin_url ? `- LinkedIn: ${lead.linkedin_url}` : ''}`;
 }
 
 export async function generateEmail(orgId: string, input: GenerateEmailInput) {
-  const [agentResult, campaignResult, leadResult] = await Promise.all([
-    supabase.from('agent_configs').select('*').eq('organization_id', orgId).single(),
+  const [agentConfig, campaignResult, leadResult] = await Promise.all([
+    ensureAgentConfig(orgId),
     supabase.from('campaigns').select('*').eq('id', input.campaignId).eq('organization_id', orgId).single(),
     supabase.from('leads').select('*').eq('id', input.leadId).eq('organization_id', orgId).single(),
   ]);
 
-  if (!agentResult.data) throw new AppError(404, 'Agent config not found');
   if (!campaignResult.data) throw new AppError(404, 'Campaign not found');
   if (!leadResult.data) throw new AppError(404, 'Lead not found');
 
-  const agentConfig = agentResult.data;
   const campaign = campaignResult.data;
   const lead = leadResult.data;
 
@@ -279,13 +278,7 @@ export async function generateReply(orgId: string, input: GenerateReplyInput) {
 
   if (!emailReply) throw new AppError(404, 'Email reply not found');
 
-  const { data: agentConfig } = await supabase
-    .from('agent_configs')
-    .select('*')
-    .eq('organization_id', orgId)
-    .single();
-
-  if (!agentConfig) throw new AppError(404, 'Agent config not found');
+  const agentConfig = await ensureAgentConfig(orgId);
 
   const { data: lead } = await supabase
     .from('leads')
@@ -347,15 +340,13 @@ export async function generateReply(orgId: string, input: GenerateReplyInput) {
 // ── Voice prompt generation ──────────────────────────────────────
 
 export async function generateVoicePrompt(orgId: string, input: GenerateVoicePromptInput) {
-  const [agentResult, campaignResult] = await Promise.all([
-    supabase.from('agent_configs').select('*').eq('organization_id', orgId).single(),
+  const [agentConfig, campaignResult] = await Promise.all([
+    ensureAgentConfig(orgId),
     supabase.from('campaigns').select('*').eq('id', input.campaignId).eq('organization_id', orgId).single(),
   ]);
 
-  if (!agentResult.data) throw new AppError(404, 'Agent config not found');
   if (!campaignResult.data) throw new AppError(404, 'Campaign not found');
 
-  const agentConfig = agentResult.data;
   const campaign = campaignResult.data;
   const toneInstruction = getToneInstruction(agentConfig.tone);
 

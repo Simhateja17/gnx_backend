@@ -23,8 +23,43 @@ async function loadOrgUser(supabaseUid: string) {
   return orgUser;
 }
 
+async function loadOrgUserById(userId: string, organizationId: string) {
+  const { data: orgUser } = await supabase
+    .from('users')
+    .select('*, organizations(*)')
+    .eq('id', userId)
+    .eq('organization_id', organizationId)
+    .single();
+
+  if (!orgUser) {
+    throw new AppError(401, 'Impersonated user not found');
+  }
+
+  return orgUser;
+}
+
+function readImpersonationToken(token?: string) {
+  if (!token) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(token, 'base64url').toString('utf-8'));
+    if (!payload?.userId || !payload?.organizationId || !payload?.expiresAt) return null;
+    if (new Date(payload.expiresAt).getTime() <= Date.now()) return null;
+    return payload as { userId: string; organizationId: string; adminUserId?: string; expiresAt: string };
+  } catch {
+    return null;
+  }
+}
+
 export async function authenticate(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   try {
+    const impersonation = readImpersonationToken(req.signedCookies?.impersonation_token);
+    if (impersonation) {
+      const orgUser = await loadOrgUserById(impersonation.userId, impersonation.organizationId);
+      req.user = { ...orgUser, impersonatedBy: impersonation.adminUserId ?? null };
+      req.organization = orgUser.organizations;
+      return next();
+    }
+
     const accessToken = req.signedCookies?.access_token;
 
     if (accessToken) {
