@@ -211,6 +211,15 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
     `[send-email] Loaded message ${emailMessageId}: campaign=${msg.campaign_id ?? 'none'}, lead=${msg.lead_id ?? 'none'}, step=${msg.step_number ?? 1}, status=${msg.status}`
   );
 
+  // If this message already sent successfully, never send it again. Without
+  // this, a job retried after the Gmail send already succeeded (e.g. a later
+  // step in this same function throwing, or any transient BullMQ retry) would
+  // silently send a real duplicate email with no guard against it.
+  if (msg.status === 'sent') {
+    console.log(`[send-email] Message ${emailMessageId} already sent (gmailMessageId=${msg.gmail_message_id}), skipping duplicate send`);
+    return { success: true, alreadySent: true, gmailMessageId: msg.gmail_message_id };
+  }
+
   const toEmail = msg.leads?.email;
   if (!toEmail) {
     console.warn(`[send-email] Message ${emailMessageId} cannot send because lead ${msg.lead_id ?? 'unknown'} has no email address`);
