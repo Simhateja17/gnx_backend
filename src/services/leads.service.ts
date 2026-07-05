@@ -80,6 +80,7 @@ function toApiLead(row: LeadRow) {
     id: row.id,
     campaignId: row.campaign_id,
     source: row.source,
+    apolloId: row.apollo_id,
     firstName: row.first_name,
     lastName: row.last_name,
     name: row.name,
@@ -168,7 +169,81 @@ export async function createLead(orgId: string, input: LeadCreateInput) {
   return toApiLead(data as unknown as LeadRow);
 }
 
-export async function searchApollo(input: ApolloSearchInput) {
+async function saveApolloPeople(orgId: string, input: ApolloSearchInput, people: ApolloPerson[]) {
+  const mappedPeople = people.map(mapApolloPerson);
+  const apolloIds = mappedPeople.map(lead => clean(lead.apolloId)).filter(Boolean) as string[];
+  const emails = mappedPeople.map(lead => clean(lead.email)).filter(Boolean) as string[];
+  const existingApolloIds = new Set<string>();
+  const existingEmails = new Set<string>();
+
+  if (apolloIds.length > 0) {
+    const { data, error } = await supabase
+      .from('leads')
+      .select('apollo_id')
+      .eq('organization_id', orgId)
+      .in('apollo_id', apolloIds);
+
+    if (error) throw new AppError(500, 'Failed to check existing Apollo leads', error);
+    for (const row of data ?? []) {
+      if (row.apollo_id) existingApolloIds.add(row.apollo_id);
+    }
+  }
+
+  if (emails.length > 0) {
+    const { data, error } = await supabase
+      .from('leads')
+      .select('email')
+      .eq('organization_id', orgId)
+      .in('email', emails);
+
+    if (error) throw new AppError(500, 'Failed to check existing Apollo leads', error);
+    for (const row of data ?? []) {
+      if (row.email) existingEmails.add(row.email);
+    }
+  }
+
+  const records = mappedPeople
+    .map((lead, index) => ({ lead, raw: people[index] as unknown as Record<string, unknown> }))
+    .filter(({ lead }) => {
+      const apolloId = clean(lead.apolloId);
+      const email = clean(lead.email);
+      return (!apolloId || !existingApolloIds.has(apolloId)) && (!email || !existingEmails.has(email));
+    })
+    .map(({ lead, raw }) => toLeadRecord(
+      orgId,
+      {
+        campaignId: input.campaignId,
+        source: 'apollo',
+        apolloId: lead.apolloId,
+        firstName: lead.firstName,
+        lastName: lead.lastName,
+        name: lead.name,
+        title: lead.title,
+        company: lead.company,
+        email: lead.email,
+        phone: lead.phone,
+        location: lead.location,
+        linkedinUrl: lead.linkedinUrl,
+      },
+      raw,
+    ));
+
+  if (records.length === 0) return { saved: [], inserted: 0, skipped: mappedPeople.length };
+
+  const { data, error } = await supabase
+    .from('leads')
+    .insert(records)
+    .select(LEAD_COLUMNS);
+
+  if (error) throw new AppError(500, 'Failed to save Apollo leads', error);
+  return {
+    saved: ((data ?? []) as unknown as LeadRow[]).map(toApiLead),
+    inserted: data?.length ?? 0,
+    skipped: mappedPeople.length - (data?.length ?? 0),
+  };
+}
+
+export async function searchApollo(orgId: string, input: ApolloSearchInput) {
   const body: Record<string, unknown> = {
     page: input.page,
     per_page: input.perPage,
@@ -200,9 +275,12 @@ export async function searchApollo(input: ApolloSearchInput) {
     pagination?: { page?: number; per_page?: number; total_entries?: number; total_pages?: number };
   };
   const people = data.people ?? data.contacts ?? [];
+  const saved = await saveApolloPeople(orgId, input, people);
 
   return {
-    items: people.map(mapApolloPerson),
+    items: saved.saved.length > 0 ? saved.saved : people.map(mapApolloPerson),
+    inserted: saved.inserted,
+    skipped: saved.skipped,
     pagination: data.pagination ?? {
       page: input.page,
       perPage: input.perPage,
