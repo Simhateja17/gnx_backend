@@ -66,6 +66,18 @@ export async function checkSendCap(organizationId: string) {
   };
 }
 
+// email_messages has a unique index on (campaign_id, lead_id, step_number),
+// meant to stop the same sequence step being sent twice. A reply isn't a
+// sequence step at all, but it still has to satisfy that constraint - reusing
+// step_number 1 collides with the lead's original campaign email every time,
+// so this finds the next free number for that lead/campaign pair instead.
+export async function getNextStepNumber(leadId: string, campaignId: string | null) {
+  let query = supabase.from('email_messages').select('step_number').eq('lead_id', leadId);
+  query = campaignId ? query.eq('campaign_id', campaignId) : query.is('campaign_id', null);
+  const { data } = await query.order('step_number', { ascending: false }).limit(1);
+  return (data?.[0]?.step_number ?? 0) + 1;
+}
+
 export async function approveAiDraftReply(organizationId: string, replyId: string, editedBody?: string) {
   const { data: reply, error } = await supabase
     .from('email_replies')
@@ -83,13 +95,15 @@ export async function approveAiDraftReply(organizationId: string, replyId: strin
     ? originalMessage.subject
     : `Re: ${originalMessage?.subject || 'Your message'}`;
 
+  const nextStepNumber = await getNextStepNumber(reply.lead_id, originalMessage?.campaign_id ?? null);
+
   const { data: queued, error: queueError } = await supabase
     .from('email_messages')
     .insert({
       organization_id: organizationId,
       campaign_id: originalMessage?.campaign_id ?? null,
       lead_id: reply.lead_id,
-      step_number: 1,
+      step_number: nextStepNumber,
       subject,
       body: approvedBody,
       gmail_thread_id: originalMessage?.gmail_thread_id ?? null,
@@ -197,6 +211,15 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
     `[send-email] Loaded message ${emailMessageId}: campaign=${msg.campaign_id ?? 'none'}, lead=${msg.lead_id ?? 'none'}, step=${msg.step_number ?? 1}, status=${msg.status}`
   );
 
+  // If this message already sent successfully, never send it again. Without
+  // this, a job retried after the Gmail send already succeeded (e.g. a later
+  // step in this same function throwing, or any transient BullMQ retry) would
+  // silently send a real duplicate email with no guard against it.
+  if (msg.status === 'sent') {
+    console.log(`[send-email] Message ${emailMessageId} already sent (gmailMessageId=${msg.gmail_message_id}), skipping duplicate send`);
+    return { success: true, alreadySent: true, gmailMessageId: msg.gmail_message_id };
+  }
+
   const toEmail = msg.leads?.email;
   if (!toEmail) {
     console.warn(`[send-email] Message ${emailMessageId} cannot send because lead ${msg.lead_id ?? 'unknown'} has no email address`);
@@ -204,12 +227,18 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
   }
 
   const stepNumber = msg.step_number ?? 1;
-  if (stepNumber > 1 && STOP_SEQUENCE_STATUSES.includes(msg.leads?.status)) {
+  // Only genuine automated sequence steps (step 2/3 follow-ups) carry a
+  // sequence_step_id - these two guards exist to stop those follow-ups once
+  // a lead has responded or the campaign's been paused. An approved reply
+  // reuses a step_number > 1 just to satisfy the DB's uniqueness constraint,
+  // but it's a direct human-approved send, not a stale automated follow-up,
+  // so it must never be silently skipped by either check.
+  if (msg.sequence_step_id && STOP_SEQUENCE_STATUSES.includes(msg.leads?.status)) {
     await markEmailSkipped(emailMessageId);
     return { success: false, reason: 'sequence_stopped', leadStatus: msg.leads?.status };
   }
 
-  if (stepNumber > 1 && msg.campaigns?.status !== 'active') {
+  if (msg.sequence_step_id && msg.campaigns?.status !== 'active') {
     await markEmailSkipped(emailMessageId);
     return { success: false, reason: 'campaign_not_active', campaignStatus: msg.campaigns?.status };
   }

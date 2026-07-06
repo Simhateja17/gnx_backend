@@ -18,6 +18,17 @@ const POST_CALL_ANALYSIS_DATA = [
   },
 ];
 
+// Without this, the LLM can only generate a spoken goodbye - it has no actual
+// mechanism to hang up, so the call stays open indefinitely after the
+// conversation is over until some other timeout intervenes.
+const GENERAL_TOOLS = [
+  {
+    name: 'end_call',
+    type: 'end_call' as const,
+    description: 'End the call when the conversation has naturally concluded, the prospect says goodbye, or asks not to be contacted again.',
+  },
+];
+
 export async function createOrUpdateRetellAgent(organizationId: string) {
   const { data: agentConfig, error } = await supabase
     .from('agent_configs')
@@ -31,7 +42,7 @@ export async function createOrUpdateRetellAgent(organizationId: string) {
 
   if (!agentConfig.retell_agent_id) {
     // First time setup: create LLM then create agent pointing at it
-    const llm = await retell.llm.create({ general_prompt: prompt }).catch((err: any) => {
+    const llm = await retell.llm.create({ general_prompt: prompt, general_tools: GENERAL_TOOLS }).catch((err: any) => {
       throw new AppError(502, `Failed to create Retell LLM: ${err.message}`);
     });
 
@@ -55,7 +66,7 @@ export async function createOrUpdateRetellAgent(organizationId: string) {
   // Existing agent: update the LLM prompt
   const llmId = agentConfig.retell_llm_id ?? await resolveLlmId(agentConfig.retell_agent_id, organizationId);
 
-  await retell.llm.update(llmId, { general_prompt: prompt }).catch((err: any) => {
+  await retell.llm.update(llmId, { general_prompt: prompt, general_tools: GENERAL_TOOLS }).catch((err: any) => {
     throw new AppError(502, `Failed to update Retell LLM: ${err.message}`);
   });
 
