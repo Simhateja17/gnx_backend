@@ -15,7 +15,7 @@ export const generateReplySchema = z.object({
 export type GenerateReplyInput = z.infer<typeof generateReplySchema>;
 
 export const generateVoicePromptSchema = z.object({
-  campaignId: z.string().uuid(),
+  campaignId: z.string().uuid().optional(),
 });
 
 export type GenerateVoicePromptInput = z.infer<typeof generateVoicePromptSchema>;

@@ -13,3 +13,11 @@ export const authRateLimiter = rateLimit({
   max: 20,
   message: { error: 'Too many auth attempts, please try again later.' },
 });
+
+export const webhookRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  message: { error: 'Too many webhook requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});

@@ -2,6 +2,7 @@ import { supabase } from '../lib/supabase';
 import { sendGmailMessage } from '../lib/gmail';
 import { enqueueSendEmail } from '../jobs/send-email.job';
 import { generateEmail, generateReply } from './ai.service';
+import { posthog } from '../lib/posthog';
 import { AppError } from '../types';
 
 const UNSUBSCRIBE_FOOTER = `\n\n---\nIf you'd like to stop receiving emails, reply "unsubscribe"\nGlobonexo | Company Address`;
@@ -268,6 +269,11 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
       .eq('status', 'queued');
 
     console.log(`[send-email] Sent message ${emailMessageId}. gmailMessageId=${result.messageId}, threadId=${result.threadId}`);
+    posthog?.capture({
+      distinctId: organizationId,
+      event: 'email_sent',
+      properties: { emailMessageId, campaignId: msg.campaign_id, leadId: msg.lead_id, stepNumber },
+    });
 
     if (msg.sequence_step_id && msg.campaign_id && msg.lead_id) {
       await enqueueNextSequenceStep({

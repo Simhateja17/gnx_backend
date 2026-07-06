@@ -340,14 +340,22 @@ export async function generateReply(orgId: string, input: GenerateReplyInput) {
 // ── Voice prompt generation ──────────────────────────────────────
 
 export async function generateVoicePrompt(orgId: string, input: GenerateVoicePromptInput) {
-  const [agentConfig, campaignResult] = await Promise.all([
-    ensureAgentConfig(orgId),
-    supabase.from('campaigns').select('*').eq('id', input.campaignId).eq('organization_id', orgId).single(),
-  ]);
+  const agentConfig = await ensureAgentConfig(orgId);
 
-  if (!campaignResult.data) throw new AppError(404, 'Campaign not found');
+  let campaignContext = '';
+  if (input.campaignId) {
+    const campaignResult = await supabase
+      .from('campaigns')
+      .select('prompt_context')
+      .eq('id', input.campaignId)
+      .eq('organization_id', orgId)
+      .single();
+    if (!campaignResult.data) throw new AppError(404, 'Campaign not found');
+    if (campaignResult.data.prompt_context) {
+      campaignContext = `- Campaign Context: ${campaignResult.data.prompt_context}`;
+    }
+  }
 
-  const campaign = campaignResult.data;
   const toneInstruction = getToneInstruction(agentConfig.tone);
 
   const prompt = `You are ${agentConfig.agent_name}, an AI sales agent making outbound phone calls.
@@ -362,7 +370,7 @@ ABOUT YOU:
 - Product: ${agentConfig.product_description}
 - Value Proposition: ${agentConfig.value_proposition}
 ${agentConfig.objections ? `- Common Objections: ${agentConfig.objections}` : ''}
-${campaign.prompt_context ? `- Campaign Context: ${campaign.prompt_context}` : ''}
+${campaignContext}
 
 TONE: ${toneInstruction}
 
