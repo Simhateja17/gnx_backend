@@ -59,6 +59,4 @@ router.post('/:replyId/reject', async (req: AuthenticatedRequest, res: Response,
   }
 });
 
-router.post('/send-test', (_req, res) => res.json({ todo: 'send test email' }));
-
 export default router;

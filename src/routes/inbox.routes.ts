@@ -79,12 +79,4 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response, next: NextFu
   }
 });
 
-router.post('/:id/reply', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
-  try {
-    res.json({ todo: 'send manual reply', id: req.params.id });
-  } catch (err) {
-    next(err);
-  }
-});
-
 export default router;
