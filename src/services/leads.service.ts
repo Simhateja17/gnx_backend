@@ -4,6 +4,7 @@ import { redis } from '../lib/redis';
 import { AppError } from '../types';
 import { mapRow } from '../lib/csv-parser';
 import { enqueueInitialEmailStepIfActive } from './campaigns.service';
+import { APOLLO_ENRICHMENT_CAP } from '../config/constants';
 import type { ApolloEnrichInput, ApolloSearchInput, CsvUploadInput, LeadCreateInput } from '../schemas/leads.schema';
 import type { CsvImportJobData, CsvImportProgress } from '../jobs/csv-import.job';
 
@@ -377,6 +378,38 @@ export async function deleteLead(orgId: string, id: string) {
   return { success: true };
 }
 
+// Apollo enrichment calls are real, billed API requests. Cap them per campaign
+// (or per org, for leads with no campaign) at whichever is smaller: the
+// campaign's own max_leads or the platform-wide APOLLO_ENRICHMENT_CAP, so a
+// misconfigured campaign can't exceed the cost-control assumption in the PRD.
+export async function checkApolloEnrichmentCap(orgId: string, campaignId: string | null) {
+  let cap: number = APOLLO_ENRICHMENT_CAP;
+
+  if (campaignId) {
+    const { data: campaign } = await supabase
+      .from('campaigns')
+      .select('max_leads')
+      .eq('organization_id', orgId)
+      .eq('id', campaignId)
+      .maybeSingle();
+    if (campaign?.max_leads) cap = Math.min(campaign.max_leads, APOLLO_ENRICHMENT_CAP);
+  }
+
+  let query = supabase
+    .from('leads')
+    .select('id', { count: 'exact', head: true })
+    .eq('organization_id', orgId)
+    .not('raw_data', 'is', null);
+  query = campaignId ? query.eq('campaign_id', campaignId) : query.is('campaign_id', null);
+
+  const { count, error } = await query;
+  if (error) throw new AppError(500, 'Failed to check Apollo enrichment cap', error);
+
+  if ((count ?? 0) >= cap) {
+    throw new AppError(429, `Apollo enrichment cap reached (${cap} leads) for this ${campaignId ? 'campaign' : 'organization'}`);
+  }
+}
+
 export async function enrichLead(orgId: string, input: ApolloEnrichInput) {
   const { data: lead, error: fetchError } = await supabase
     .from('leads')
@@ -388,6 +421,8 @@ export async function enrichLead(orgId: string, input: ApolloEnrichInput) {
   if (fetchError || !lead) throw new AppError(404, 'Lead not found');
 
   const row = lead as unknown as LeadRow;
+  await checkApolloEnrichmentCap(orgId, row.campaign_id);
+
   const enrichBody: Record<string, unknown> = {};
 
   if (row.apollo_id) {
