@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import { Worker } from 'bullmq';
+import * as Sentry from '@sentry/node';
+import { env } from '../config/env';
 import { redisConnection } from '../lib/redis';
 import { supabase } from '../lib/supabase';
 import { enqueueRecurringPollInbox } from '../jobs/poll-inbox.job';
@@ -14,6 +16,11 @@ import type { PollInboxJobData } from '../jobs/poll-inbox.job';
 import type { ScheduleCallJobData } from '../jobs/schedule-call.job';
 import type { EnrichLeadsJobData } from '../jobs/enrich-leads.job';
 import type { CsvImportJobData } from '../jobs/csv-import.job';
+
+Sentry.init({
+  dsn: env.SENTRY_DSN,
+  environment: env.NODE_ENV,
+});
 
 const sendEmailWorker = new Worker<SendEmailJobData>('send-email', async (job) => {
   console.log(`[send-email] Processing job ${job.id}`);
@@ -130,11 +137,18 @@ const csvImportWorker = new Worker<CsvImportJobData>('csv-import', async (job) =
   concurrency: 2,
 });
 
-sendEmailWorker.on('failed', (job, err) => console.error(`[send-email] Job ${job?.id} failed:`, err.message));
-pollInboxWorker.on('failed', (job, err) => console.error(`[poll-inbox] Job ${job?.id} failed:`, err.message));
-scheduleCallWorker.on('failed', (job, err) => console.error(`[schedule-call] Job ${job?.id} failed:`, err.message));
-enrichLeadsWorker.on('failed', (job, err) => console.error(`[enrich-leads] Job ${job?.id} failed:`, err.message));
-csvImportWorker.on('failed', (job, err) => console.error(`[csv-import] Job ${job?.id} failed:`, err.message));
+function reportJobFailure(queue: string, job: { id?: string; attemptsMade?: number } | undefined, err: Error) {
+  console.error(`[${queue}] Job ${job?.id} failed:`, err.message);
+  Sentry.captureException(err, {
+    extra: { queue, jobId: job?.id, attemptsMade: job?.attemptsMade },
+  });
+}
+
+sendEmailWorker.on('failed', (job, err) => reportJobFailure('send-email', job, err));
+pollInboxWorker.on('failed', (job, err) => reportJobFailure('poll-inbox', job, err));
+scheduleCallWorker.on('failed', (job, err) => reportJobFailure('schedule-call', job, err));
+enrichLeadsWorker.on('failed', (job, err) => reportJobFailure('enrich-leads', job, err));
+csvImportWorker.on('failed', (job, err) => reportJobFailure('csv-import', job, err));
 
 console.log('Workers started: send-email, poll-inbox, schedule-call, enrich-leads, csv-import');
 

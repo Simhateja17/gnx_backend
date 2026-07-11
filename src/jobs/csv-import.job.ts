@@ -1,5 +1,5 @@
 import { Queue } from 'bullmq';
-import { redisConnection } from '../lib/redis';
+import { queueConnection } from '../lib/redis';
 
 export interface CsvImportJobData {
   organizationId: string;
@@ -20,7 +20,7 @@ export interface CsvImportProgress {
   fileName: string;
 }
 
-const csvImportQueue = new Queue<CsvImportJobData, any, string>('csv-import', { connection: redisConnection });
+const csvImportQueue = new Queue<CsvImportJobData, any, string>('csv-import', { connection: queueConnection });
 
 export async function enqueueCsvImport(data: CsvImportJobData) {
   return csvImportQueue.add('csv-import', data, {
