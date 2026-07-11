@@ -30,7 +30,7 @@ router.post('/login', authRateLimiter, validate(loginSchema), async (req, res, n
   }
 });
 
-router.post('/logout', async (req, res, next) => {
+router.post('/logout', authRateLimiter, async (req, res, next) => {
   try {
     await authService.logout(req.signedCookies?.access_token);
     clearAuthCookies(res);
@@ -69,7 +69,7 @@ router.get('/google', (_req, res) => {
 });
 
 // Complete Google OAuth — receives tokens from frontend callback, sets cookies
-router.post('/google/callback', async (req, res, next) => {
+router.post('/google/callback', authRateLimiter, async (req, res, next) => {
   try {
     const { accessToken, refreshToken, expiresIn } = req.body;
     if (!accessToken) throw new AppError(400, 'Missing access token');
