@@ -334,8 +334,17 @@ export async function setCampaignStatus(
   }
 
   if (status === 'active' && campaign.channel === 'voice') {
-    const result = await enqueueVoiceCalls(orgId, id, campaign);
-    return { ...campaign, ...result };
+    try {
+      const result = await enqueueVoiceCalls(orgId, id, campaign);
+      return { ...campaign, ...result };
+    } catch (err) {
+      await supabase
+        .from('campaigns')
+        .update({ status: 'paused', updated_at: new Date().toISOString() })
+        .eq('organization_id', orgId)
+        .eq('id', id);
+      throw err;
+    }
   }
 
   console.log(`[campaigns] Campaign ${id} status set to ${status}. No email jobs queued for channel ${campaign.channel}.`);
