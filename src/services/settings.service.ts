@@ -3,28 +3,28 @@ import { AppError } from '../types';
 import { UpdateSettingsInput } from '../schemas/settings.schema';
 
 export async function getSettings(userId: string, orgId: string) {
-  const { data: user, error: userError } = await supabase
-    .from('users')
-    .select('first_name, last_name, email')
-    .eq('id', userId)
-    .single();
+  // These three queries are independent (different tables, no data
+  // dependency between them) but ran sequentially — three round trips to
+  // Supabase back-to-back on every settings load. Running them in parallel
+  // caps the wait at the slowest single query instead of their sum.
+  const [userResult, orgResult, configResult] = await Promise.all([
+    supabase.from('users').select('first_name, last_name, email').eq('id', userId).single(),
+    supabase.from('organizations').select('name, website').eq('id', orgId).single(),
+    // agent_configs may not exist yet if onboarding was skipped — return defaults gracefully
+    supabase
+      .from('agent_configs')
+      .select('tone, auto_approve_replies, daily_email_send_cap, booking_link, retell_phone_number, retell_agent_id')
+      .eq('organization_id', orgId)
+      .single(),
+  ]);
 
+  const { data: user, error: userError } = userResult;
   if (userError || !user) throw new AppError(404, 'User not found');
 
-  const { data: org, error: orgError } = await supabase
-    .from('organizations')
-    .select('name, website')
-    .eq('id', orgId)
-    .single();
-
+  const { data: org, error: orgError } = orgResult;
   if (orgError || !org) throw new AppError(404, 'Organisation not found');
 
-  // agent_configs may not exist yet if onboarding was skipped — return defaults gracefully
-  const { data: config } = await supabase
-    .from('agent_configs')
-    .select('tone, auto_approve_replies, daily_email_send_cap, booking_link, retell_phone_number, retell_agent_id')
-    .eq('organization_id', orgId)
-    .single();
+  const { data: config } = configResult;
 
   return {
     profile: {
