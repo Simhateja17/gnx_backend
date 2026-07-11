@@ -19,7 +19,7 @@ vi.mock('bullmq', () => {
   return { Queue: MockQueue };
 });
 
-vi.mock('../lib/redis', () => ({ redisConnection: {} }));
+vi.mock('../lib/redis', () => ({ redisConnection: {}, queueConnection: {} }));
 
 import { enqueueSendEmail } from './send-email.job';
 import { enqueuePollInbox } from './poll-inbox.job';

@@ -1,4 +1,6 @@
+import crypto from 'crypto';
 import { supabase } from '../lib/supabase';
+import { env } from '../config/env';
 import { AppError } from '../types';
 
 function countBy<T extends Record<string, any>>(rows: T[], key: keyof T) {
@@ -207,6 +209,37 @@ export async function createImpersonationToken(id: string, adminUserId: string) 
 
   return {
     ...payload,
-    token: Buffer.from(JSON.stringify(payload)).toString('base64url'),
+    token: signImpersonationPayload(payload),
   };
+}
+
+// The token is base64url(payload) + '.' + an HMAC of that payload signed with
+// a server-only secret, so it can't be forged by constructing a similar-looking
+// JSON blob — the same shape as a lightweight JWT. Nothing decodes this token
+// yet (no "redeem impersonation token" endpoint exists), but verifyImpersonationToken
+// is here so a future consumer checks the signature and expiry instead of
+// trusting the payload as-is.
+function signImpersonationPayload(payload: Record<string, unknown>): string {
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = crypto.createHmac('sha256', env.JWT_SECRET).update(encoded).digest('base64url');
+  return `${encoded}.${signature}`;
+}
+
+export function verifyImpersonationToken(token: string): Record<string, unknown> {
+  const [encoded, signature] = token.split('.');
+  if (!encoded || !signature) throw new AppError(401, 'Malformed impersonation token');
+
+  const expectedSignature = crypto.createHmac('sha256', env.JWT_SECRET).update(encoded).digest('base64url');
+  const expected = Buffer.from(expectedSignature);
+  const actual = Buffer.from(signature);
+  if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+    throw new AppError(401, 'Invalid impersonation token signature');
+  }
+
+  const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf-8'));
+  if (new Date(payload.expiresAt).getTime() < Date.now()) {
+    throw new AppError(401, 'Impersonation token expired');
+  }
+
+  return payload;
 }

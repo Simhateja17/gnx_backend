@@ -1,12 +1,15 @@
 import { supabase } from '../lib/supabase';
 import { env } from '../config/env';
 import { AppError } from '../types';
+import { checkApolloEnrichmentCap } from './leads.service';
 
 export async function enrichLeads(
   organizationId: string,
   leadIds: string[],
   _campaignId: string,
 ) {
+  await checkApolloEnrichmentCap(organizationId, _campaignId || null);
+
   const { data: leads, error } = await supabase
     .from('leads')
     .select('id, email, first_name, last_name, company')

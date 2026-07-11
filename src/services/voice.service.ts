@@ -176,10 +176,11 @@ export async function scheduleCall(
 export async function handleRetellWebhook(rawBody: Buffer, signature: string) {
   const bodyStr = rawBody.toString('utf-8');
 
-  if (env.RETELL_WEBHOOK_SECRET) {
-    const valid = Retell.verify(bodyStr, env.RETELL_WEBHOOK_SECRET, signature);
-    if (!valid) throw new AppError(401, 'Invalid webhook signature');
+  if (!env.RETELL_WEBHOOK_SECRET) {
+    throw new AppError(500, 'RETELL_WEBHOOK_SECRET is not configured — refusing to process unverified webhook');
   }
+  const valid = Retell.verify(bodyStr, env.RETELL_WEBHOOK_SECRET, signature);
+  if (!valid) throw new AppError(401, 'Invalid webhook signature');
 
   const payload = JSON.parse(bodyStr) as { event: string; call: Record<string, any> };
   const { event, call } = payload;

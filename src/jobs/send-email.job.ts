@@ -1,5 +1,5 @@
 import { JobsOptions, Queue } from 'bullmq';
-import { redisConnection } from '../lib/redis';
+import { queueConnection } from '../lib/redis';
 
 export interface SendEmailJobData {
   emailMessageId: string;
@@ -9,7 +9,7 @@ export interface SendEmailJobData {
   stepNumber?:    number;
 }
 
-const sendEmailQueue = new Queue<SendEmailJobData, any, string>('send-email', { connection: redisConnection });
+const sendEmailQueue = new Queue<SendEmailJobData, any, string>('send-email', { connection: queueConnection });
 
 export async function enqueueSendEmail(data: SendEmailJobData, options: JobsOptions = {}) {
   return sendEmailQueue.add('send-email', data, {
