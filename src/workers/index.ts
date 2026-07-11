@@ -9,7 +9,7 @@ import { enqueueScheduleCall } from '../jobs/schedule-call.job';
 import { sendEmail, checkSendCap } from '../services/email.service';
 import { pollInbox } from '../services/gmail.service';
 import { scheduleCall } from '../services/voice.service';
-import { enrichLeads } from '../services/inbox.service';
+import { enrichLeads } from '../services/leads.service';
 import { processCsvImportJob } from '../services/leads.service';
 import type { SendEmailJobData } from '../jobs/send-email.job';
 import type { PollInboxJobData } from '../jobs/poll-inbox.job';

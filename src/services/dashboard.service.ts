@@ -355,7 +355,10 @@ export async function getAnalytics(orgId: string) {
     emailed: emails.length,
     replied: replies.length,
     meetingsBooked: totalMeetings,
-    closed: leads.filter(l => l.status === 'won').length,
+    // leads.status has no 'won'/closed-deal concept yet (CRM concepts are
+    // deferred to v0.2 per the PRD) — hardcoded to 0 rather than filtering
+    // on a status value the leads table's CHECK constraint never allows.
+    closed: 0,
   };
 
   return {
