@@ -26,9 +26,54 @@ async function getGmailCredentials(organizationId: string) {
   };
 }
 
+// There's no org-level timezone column — only campaigns.timezone, which is
+// per-campaign — so this uses the org's most recently created campaign's
+// timezone as a stand-in for "the org's timezone", falling back to the same
+// default campaigns.timezone itself defaults to when the org has none yet.
+async function getOrgTimezone(organizationId: string): Promise<string> {
+  const { data } = await supabase
+    .from('campaigns')
+    .select('timezone')
+    .eq('organization_id', organizationId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return data?.timezone ?? 'America/New_York';
+}
+
+function getTimezoneOffsetMinutes(timeZone: string, date: Date): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(date).reduce((acc, p) => {
+    if (p.type !== 'literal') acc[p.type] = p.value;
+    return acc;
+  }, {} as Record<string, string>);
+
+  const asUtc = Date.UTC(
+    Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+    Number(parts.hour), Number(parts.minute), Number(parts.second),
+  );
+  return (asUtc - date.getTime()) / 60_000;
+}
+
+// Computes the UTC instant of local midnight in `timeZone`, for the day
+// `reference` falls on. Recomputes the offset from `reference` itself
+// (rather than assuming a fixed UTC offset) so this stays correct across
+// DST transitions.
+export function startOfDayUtcForTimezone(timeZone: string, reference = new Date()): Date {
+  const offsetMinutes = getTimezoneOffsetMinutes(timeZone, reference);
+  const shifted = new Date(reference.getTime() + offsetMinutes * 60_000);
+  shifted.setUTCHours(0, 0, 0, 0);
+  return new Date(shifted.getTime() - offsetMinutes * 60_000);
+}
+
 async function getTodaySentCount(organizationId: string) {
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
+  const timezone = await getOrgTimezone(organizationId);
+  const startOfDay = startOfDayUtcForTimezone(timezone);
 
   const { count, error } = await supabase
     .from('email_messages')
@@ -278,7 +323,23 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
       toEmail,
       subject,
       body,
-      { threadId: msg.gmail_thread_id },
+      {
+        threadId: msg.gmail_thread_id,
+        onTokenRefresh: (tokens) => {
+          void supabase
+            .from('connected_accounts')
+            .update({
+              access_token: tokens.access_token,
+              expires_at: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('organization_id', organizationId)
+            .eq('provider', 'gmail')
+            .then(({ error }) => {
+              if (error) console.error(`[send-email] Failed to persist refreshed Gmail token for org ${organizationId}:`, error.message);
+            });
+        },
+      },
     );
 
     await supabase
