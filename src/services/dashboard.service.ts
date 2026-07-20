@@ -306,7 +306,7 @@ export async function getAnalytics(orgId: string) {
   const now = new Date();
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-  const [emailsResult, repliesResult, leadsResult] = await Promise.all([
+  const [emailsResult, repliesResult, leadsResult, callsResult] = await Promise.all([
     supabase
       .from('email_messages')
       .select('id, status, sent_at, created_at')
@@ -322,11 +322,20 @@ export async function getAnalytics(orgId: string) {
       .from('leads')
       .select('id, status, score, created_at')
       .eq('organization_id', orgId),
+    supabase
+      .from('calls')
+      .select('id, status, disposition')
+      .eq('organization_id', orgId),
   ]);
 
   const emails = emailsResult.data ?? [];
   const replies = repliesResult.data ?? [];
   const leads = leadsResult.data ?? [];
+  const calls = callsResult.data ?? [];
+
+  const totalCalls = calls.length;
+  const answeredCalls = calls.filter(c => !['queued', 'failed', 'no_answer'].includes(c.status)).length;
+  const callMeetings = calls.filter(c => c.disposition === 'meeting_booked').length;
 
   const totalEmails = emails.length;
   const totalReplies = replies.length;
@@ -371,6 +380,14 @@ export async function getAnalytics(orgId: string) {
     dailyMeetings,
     dayLabels,
     funnel,
+    calls: {
+      total: totalCalls,
+      answered: answeredCalls,
+      answerRate: totalCalls > 0 ? ((answeredCalls / totalCalls) * 100).toFixed(1) : '0',
+      meetingsBooked: callMeetings,
+      voicemail: calls.filter(c => c.status === 'voicemail').length,
+      failed: calls.filter(c => c.status === 'failed').length,
+    },
   };
 }
 
