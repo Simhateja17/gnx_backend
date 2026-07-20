@@ -292,7 +292,16 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
       .update({ status: 'failed' })
       .eq('id', emailMessageId);
 
-    throw new AppError(502, `Gmail send failed: ${err.message}`);
+    const providerError = err.response?.data?.error ?? err.message;
+    if (providerError === 'unauthorized_client') {
+      throw new AppError(
+        502,
+        'Gmail send failed: this Gmail connection is not authorized. Reconnect Gmail in Settings, then try again.',
+        err.response?.data,
+      );
+    }
+
+    throw new AppError(502, `Gmail send failed: ${err.message}`, err.response?.data);
   }
 }
 

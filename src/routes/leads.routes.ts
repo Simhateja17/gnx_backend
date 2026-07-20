@@ -3,7 +3,7 @@ import multer from 'multer';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
 import { validate } from '../middleware/validate.middleware';
 import { apolloEnrichSchema, apolloSearchSchema, csvUploadSchema, leadCreateSchema } from '../schemas/leads.schema';
-import { createLead, deleteLead, enrichLead, getCsvImportProgress, listLeads, listLeadsFiltered, searchApollo, uploadCsvLeads } from '../services/leads.service';
+import { createLead, deleteLead, enrichLead, getCsvImportProgress, listLeads, listLeadsFiltered, searchApollo, sendLeadNow, uploadCsvLeads } from '../services/leads.service';
 import { parseCsv, mapHeaders } from '../lib/csv-parser';
 import { enqueueCsvImport } from '../jobs/csv-import.job';
 import { AppError } from '../types';
@@ -134,6 +134,14 @@ router.get('/csv-import/:jobId', async (req: AuthenticatedRequest, res: Response
       return;
     }
     res.json(progress);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/:id/send-now', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await sendLeadNow(getOrgId(req), req.params.id));
   } catch (err) {
     next(err);
   }
