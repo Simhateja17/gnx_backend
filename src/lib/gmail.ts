@@ -9,11 +9,12 @@ export function createOAuth2Client() {
   );
 }
 
-export function getAuthUrl() {
+export function getAuthUrl(state?: string) {
   const client = createOAuth2Client();
   return client.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
+    ...(state ? { state } : {}),
     scope: [
       'https://www.googleapis.com/auth/gmail.send',
       'https://www.googleapis.com/auth/gmail.readonly',

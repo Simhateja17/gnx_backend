@@ -16,6 +16,7 @@ import settingsRoutes from './settings.routes';
 import adminRoutes from './admin.routes';
 import supportRoutes from './support.routes';
 import systemRoutes from './system.routes';
+import meetingsRoutes from './meetings.routes';
 
 const router = Router();
 
@@ -36,5 +37,6 @@ router.use('/settings', settingsRoutes);
 router.use('/admin', adminRoutes);
 router.use('/support', supportRoutes);
 router.use('/system', systemRoutes);
+router.use('/meetings', meetingsRoutes);
 
 export default router;

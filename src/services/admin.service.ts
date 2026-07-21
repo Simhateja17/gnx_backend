@@ -25,6 +25,7 @@ export async function getAdminOverview() {
     repliesResult,
     callsResult,
     ticketsResult,
+    meetingsResult,
   ] = await Promise.all([
     supabase.from('organizations').select('id,name,website,plan_id,subscription_status,created_at,updated_at'),
     supabase.from('users').select('id,organization_id,email,first_name,last_name,role,created_at'),
@@ -34,6 +35,7 @@ export async function getAdminOverview() {
     supabase.from('email_replies').select('id,organization_id,ai_draft_status,received_at'),
     supabase.from('calls').select('id,organization_id,status,disposition,created_at'),
     supabase.from('support_tickets').select('id,organization_id,status,created_at,updated_at'),
+    supabase.from('meetings').select('id,organization_id,campaign_id,status,scheduled_at'),
   ]);
 
   const failures = [
@@ -45,6 +47,7 @@ export async function getAdminOverview() {
     ['replies', repliesResult.error],
     ['calls', callsResult.error],
     ['support tickets', ticketsResult.error],
+    ['meetings', meetingsResult.error],
   ] as const;
   const failure = failures.find(([, error]) => error);
   if (failure) throw new AppError(500, `Failed to fetch admin ${failure[0]}`, failure[1]);
@@ -57,6 +60,7 @@ export async function getAdminOverview() {
   const replies = repliesResult.data ?? [];
   const calls = callsResult.data ?? [];
   const tickets = ticketsResult.data ?? [];
+  const meetings = meetingsResult.data ?? [];
 
   const organizations = orgs.map(org => {
     const orgUsers = users.filter(user => user.organization_id === org.id);
@@ -66,6 +70,7 @@ export async function getAdminOverview() {
     const orgReplies = replies.filter(reply => reply.organization_id === org.id);
     const orgCalls = calls.filter(call => call.organization_id === org.id);
     const orgTickets = tickets.filter(ticket => ticket.organization_id === org.id);
+    const orgMeetings = meetings.filter(meeting => meeting.organization_id === org.id);
 
     return {
       id: org.id,
@@ -81,7 +86,7 @@ export async function getAdminOverview() {
         activeCampaigns: orgCampaigns.filter(campaign => campaign.status === 'active').length,
         leads: orgLeads.length,
         hotLeads: orgLeads.filter(lead => Number(lead.score ?? 0) >= 80 || lead.status === 'engaged').length,
-        meetings: orgLeads.filter(lead => lead.status === 'meeting_booked').length + orgCalls.filter(call => call.disposition === 'meeting_booked').length,
+        meetings: orgMeetings.length,
         emailsSent: orgEmails.filter(email => email.status === 'sent').length,
         replies: orgReplies.length,
         calls: orgCalls.length,
@@ -101,7 +106,7 @@ export async function getAdminOverview() {
       emailsSent: emails.filter(email => email.status === 'sent').length,
       replies: replies.length,
       calls: calls.length,
-      meetings: leads.filter(lead => lead.status === 'meeting_booked').length + calls.filter(call => call.disposition === 'meeting_booked').length,
+      meetings: meetings.length,
       openTickets: tickets.filter(ticket => ticket.status === 'open').length,
       plans: countBy(orgs, 'plan_id'),
       subscriptionStatuses: countBy(orgs, 'subscription_status'),
@@ -119,6 +124,7 @@ export async function getAdminOverview() {
     campaigns: campaigns.map(campaign => {
       const campaignLeads = leads.filter(lead => lead.campaign_id === campaign.id);
       const campaignEmails = emails.filter(email => email.campaign_id === campaign.id);
+      const campaignMeetings = meetings.filter(meeting => meeting.campaign_id === campaign.id);
       return {
         id: campaign.id,
         organizationId: campaign.organization_id,
@@ -131,7 +137,7 @@ export async function getAdminOverview() {
         stats: {
           leads: campaignLeads.length,
           emailsSent: campaignEmails.filter(email => email.status === 'sent').length,
-          meetings: campaignLeads.filter(lead => lead.status === 'meeting_booked').length,
+          meetings: campaignMeetings.length,
         },
       };
     }).sort((a, b) => sum([b.stats], 'leads') - sum([a.stats], 'leads')),
