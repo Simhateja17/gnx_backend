@@ -27,9 +27,9 @@
     "multer": "^2.2.0",
     "openai": "^4.47.0",
     "posthog-node": "^4.2.0",
+    "razorpay": "^2.9.4",
     "resend": "^3.2.0",
     "retell-sdk": "^4.0.0",
-    "stripe": "^15.6.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {

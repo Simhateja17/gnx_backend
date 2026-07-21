@@ -1,5 +1,8 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
+import { validate } from '../middleware/validate.middleware';
+import { checkoutSchema, checkoutVerifySchema } from '../schemas/billing.schema';
+import * as billingService from '../services/billing.service';
 import { AppError } from '../types';
 import { supabase } from '../lib/supabase';
 
@@ -42,20 +45,41 @@ router.get('/usage', async (req: AuthenticatedRequest, res: Response, next: Next
       emailsSentThisMonth: emailsResult.count ?? 0,
       seatsUsed: usersResult.count ?? 0,
       activeCampaigns: campaignsResult.count ?? 0,
-      plan: req.organization?.plan ?? 'starter',
+      plan: req.organization?.plan_id ?? 'starter',
+      subscriptionStatus: req.organization?.subscription_status ?? 'trialing',
     });
   } catch (err) {
     next(err);
   }
 });
 
-router.post('/checkout', (_req, res) => res.json({
-  status: 'coming_soon',
-  message: 'Billing is launching soon — you have full access during early access.',
-}));
-router.post('/portal', (_req, res) => res.json({
-  status: 'coming_soon',
-  message: 'The billing portal is launching soon — reach out to support for plan changes in the meantime.',
-}));
+router.post('/checkout', validate(checkoutSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const orgId = getOrgId(req);
+    const { planId, billingPeriod } = req.body;
+    const order = await billingService.createOrder(orgId, planId, billingPeriod);
+    res.json(order);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/checkout/verify', validate(checkoutVerifySchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const orgId = getOrgId(req);
+    const result = await billingService.verifyCheckoutSignature(orgId, req.body);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/history', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await billingService.getBillingHistory(getOrgId(req)));
+  } catch (err) {
+    next(err);
+  }
+});
 
 export default router;

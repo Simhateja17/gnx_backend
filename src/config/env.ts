@@ -27,11 +27,19 @@ const envSchema = z.object({
 
   APOLLO_API_KEY: z.string().trim().default(''),
 
-  STRIPE_SECRET_KEY: z.string().trim().default(''),
-  STRIPE_WEBHOOK_SECRET: z.string().trim().default(''),
-  STRIPE_PRICE_STARTER: z.string().trim().default(''),
-  STRIPE_PRICE_GROWTH: z.string().trim().default(''),
-  STRIPE_PRICE_SCALE: z.string().trim().default(''),
+  RAZORPAY_KEY_ID: z.string().trim().default(''),
+  RAZORPAY_KEY_SECRET: z.string().trim().default(''),
+  RAZORPAY_WEBHOOK_SECRET: z.string().trim().default(''),
+
+  // Plan prices in the smallest USD unit (cents). Matches frontend/app/(app)/billing/page.jsx's PLAN_CONFIG.
+  RAZORPAY_PLAN_STARTER_MONTHLY_AMOUNT: z.coerce.number().default(5900),
+  RAZORPAY_PLAN_STARTER_ANNUAL_AMOUNT: z.coerce.number().default(4900),
+  RAZORPAY_PLAN_GROWTH_MONTHLY_AMOUNT: z.coerce.number().default(17900),
+  RAZORPAY_PLAN_GROWTH_ANNUAL_AMOUNT: z.coerce.number().default(14900),
+  RAZORPAY_PLAN_SCALE_MONTHLY_AMOUNT: z.coerce.number().default(47900),
+  RAZORPAY_PLAN_SCALE_ANNUAL_AMOUNT: z.coerce.number().default(39900),
+
+  BILLING_GRACE_PERIOD_DAYS: z.coerce.number().default(7),
 
   RESEND_API_KEY: z.string().trim().default(''),
   RESEND_FROM_EMAIL: z.string().default('noreply@globonexo.com'),

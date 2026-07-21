@@ -8,6 +8,7 @@ import { errorHandler } from './middleware/error.middleware';
 import { rateLimiter, webhookRateLimiter } from './middleware/rate-limit.middleware';
 import routes from './routes';
 import * as voiceService from './services/voice.service';
+import * as billingService from './services/billing.service';
 
 export const app = express();
 
@@ -33,6 +34,16 @@ app.post('/webhooks/retell', webhookRateLimiter, express.raw({ type: 'applicatio
     res.json({ received: true });
   } catch (err: any) {
     res.status(err.statusCode ?? 500).json({ error: err.message });
+  }
+});
+
+// Razorpay webhook — must come before express.json() so we receive the raw bytes for signature verification
+app.post('/webhooks/razorpay', webhookRateLimiter, express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    await billingService.handleRazorpayWebhook(req.body as Buffer, req.headers['x-razorpay-signature'] as string ?? '');
+    res.json({ received: true });
+  } catch (err: any) {
+    res.status(err.status ?? 500).json({ error: err.message });
   }
 });
 

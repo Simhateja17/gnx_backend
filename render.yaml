@@ -43,15 +43,25 @@ services:
         sync: false
       - key: APOLLO_API_KEY
         sync: false
-      - key: STRIPE_SECRET_KEY
+      - key: RAZORPAY_KEY_ID
         sync: false
-      - key: STRIPE_WEBHOOK_SECRET
+      - key: RAZORPAY_KEY_SECRET
         sync: false
-      - key: STRIPE_PRICE_STARTER
+      - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
-      - key: STRIPE_PRICE_GROWTH
+      - key: RAZORPAY_PLAN_STARTER_MONTHLY_AMOUNT
         sync: false
-      - key: STRIPE_PRICE_SCALE
+      - key: RAZORPAY_PLAN_STARTER_ANNUAL_AMOUNT
+        sync: false
+      - key: RAZORPAY_PLAN_GROWTH_MONTHLY_AMOUNT
+        sync: false
+      - key: RAZORPAY_PLAN_GROWTH_ANNUAL_AMOUNT
+        sync: false
+      - key: RAZORPAY_PLAN_SCALE_MONTHLY_AMOUNT
+        sync: false
+      - key: RAZORPAY_PLAN_SCALE_ANNUAL_AMOUNT
+        sync: false
+      - key: BILLING_GRACE_PERIOD_DAYS
         sync: false
       - key: RESEND_API_KEY
         sync: false
@@ -103,15 +113,25 @@ services:
         sync: false
       - key: APOLLO_API_KEY
         sync: false
-      - key: STRIPE_SECRET_KEY
+      - key: RAZORPAY_KEY_ID
         sync: false
-      - key: STRIPE_WEBHOOK_SECRET
+      - key: RAZORPAY_KEY_SECRET
         sync: false
-      - key: STRIPE_PRICE_STARTER
+      - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
-      - key: STRIPE_PRICE_GROWTH
+      - key: RAZORPAY_PLAN_STARTER_MONTHLY_AMOUNT
         sync: false
-      - key: STRIPE_PRICE_SCALE
+      - key: RAZORPAY_PLAN_STARTER_ANNUAL_AMOUNT
+        sync: false
+      - key: RAZORPAY_PLAN_GROWTH_MONTHLY_AMOUNT
+        sync: false
+      - key: RAZORPAY_PLAN_GROWTH_ANNUAL_AMOUNT
+        sync: false
+      - key: RAZORPAY_PLAN_SCALE_MONTHLY_AMOUNT
+        sync: false
+      - key: RAZORPAY_PLAN_SCALE_ANNUAL_AMOUNT
+        sync: false
+      - key: BILLING_GRACE_PERIOD_DAYS
         sync: false
       - key: RESEND_API_KEY
         sync: false

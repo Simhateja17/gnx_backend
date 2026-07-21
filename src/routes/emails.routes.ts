@@ -1,5 +1,6 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
+import { requireActiveSubscription } from '../middleware/billing.middleware';
 import {
   approveAiDraftReply,
   checkSendCap,
@@ -26,7 +27,7 @@ router.get('/send-cap', async (req: AuthenticatedRequest, res: Response, next: N
   }
 });
 
-router.post('/:replyId/approve', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+router.post('/:replyId/approve', requireActiveSubscription, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     const body = typeof req.body?.body === 'string' ? req.body.body : undefined;
     res.json(await approveAiDraftReply(getOrgId(req), req.params.replyId, body));
