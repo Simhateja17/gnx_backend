@@ -58,11 +58,9 @@ function loadEnv(): z.infer<typeof envSchema> {
   } catch (err) {
     if (err instanceof z.ZodError) {
       const missing = err.issues.map((issue) => issue.path.join('.')).join(', ');
-      console.error(`Missing or invalid environment variables: ${missing}`);
-    } else {
-      console.error('Failed to parse environment variables:', err);
+      throw new Error(`Missing or invalid environment variables: ${missing}`);
     }
-    process.exit(1);
+    throw err;
   }
 }
 
