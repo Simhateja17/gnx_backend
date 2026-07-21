@@ -329,8 +329,17 @@ export async function setCampaignStatus(
   }
 
   if (status === 'active' && campaign.channel === 'voice') {
-    const result = await enqueueVoiceCalls(orgId, id, campaign);
-    return { ...campaign, ...result };
+    try {
+      const result = await enqueueVoiceCalls(orgId, id, campaign);
+      return { ...campaign, ...result };
+    } catch (err) {
+      await supabase
+        .from('campaigns')
+        .update({ status: 'paused', updated_at: new Date().toISOString() })
+        .eq('organization_id', orgId)
+        .eq('id', id);
+      throw err;
+    }
   }
 
   console.log(`[campaigns] Campaign ${id} status set to ${status}. No email jobs queued for channel ${campaign.channel}.`);
@@ -589,7 +598,7 @@ export async function upsertSequenceSteps(orgId: string, campaignId: string, inp
 }
 
 export async function assignLeadsToCampaign(orgId: string, campaignId: string, input: AssignLeadsInput) {
-  await getCampaign(orgId, campaignId);
+  const campaign = await getCampaign(orgId, campaignId);
 
   const { data, error } = await supabase
     .from('leads')
@@ -600,5 +609,24 @@ export async function assignLeadsToCampaign(orgId: string, campaignId: string, i
 
   if (error) throw new AppError(500, 'Failed to assign leads', error);
 
+  await enqueueInitialEmailStepIfActive(orgId, campaignId, campaign);
+
   return { assigned: data?.length ?? 0 };
+}
+
+// Leads can be attached to a campaign well after it was launched (assigning
+// existing leads, CSV import, Apollo search-and-save all take an optional
+// campaignId). The "queue the first email" step normally only runs once, at
+// the moment a campaign is launched, so without this, leads added afterward
+// would silently never receive anything. enqueueInitialEmailStep already
+// skips leads that already have a step-1 email, so it's safe to call again
+// here - only the newly-added, still-eligible leads actually get queued.
+export async function enqueueInitialEmailStepIfActive(
+  orgId: string,
+  campaignId: string,
+  campaign?: { status: string; channel: string },
+) {
+  const current = campaign ?? await getCampaign(orgId, campaignId);
+  if (current.status !== 'active' || current.channel !== 'email') return;
+  await enqueueInitialEmailStep(orgId, campaignId);
 }

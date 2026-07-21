@@ -1,7 +1,7 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
 import { supabase } from '../lib/supabase';
-import { enqueueRecurringPollInbox } from '../jobs/poll-inbox.job';
+import { enqueueRecurringPollInbox, removeRecurringPollInbox } from '../jobs/poll-inbox.job';
 import { getAuthUrl, exchangeCode, createOAuth2Client } from '../lib/gmail';
 import { google } from 'googleapis';
 import { AppError } from '../types';
@@ -124,6 +124,15 @@ router.delete('/disconnect', async (req: AuthenticatedRequest, res: Response, ne
 
     if (error) throw new AppError(500, 'Failed to disconnect Gmail', error);
     if (!data) throw new AppError(404, 'No Gmail connection found');
+
+    // The account is already disconnected at this point (the DB row above
+    // is gone). Removing the recurring poll job is best-effort cleanup — a
+    // Redis hiccup here shouldn't make the whole request look like it failed.
+    try {
+      await removeRecurringPollInbox(data.id);
+    } catch (cleanupErr) {
+      console.warn('[Gmail] failed to remove recurring poll-inbox job on disconnect:', (cleanupErr as Error).message);
+    }
 
     res.json({ success: true });
   } catch (err) {

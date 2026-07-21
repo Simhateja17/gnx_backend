@@ -43,20 +43,20 @@ export async function getDashboard(userId: string, orgId: string) {
       .single(),
     supabase
       .from('email_messages')
-      .select('id, subject, status, sent_at, created_at, lead_id, leads(first_name, last_name, company)')
+      .select('id, subject, status, sent_at, created_at, lead_id, leads(name, first_name, last_name, company)')
       .eq('organization_id', orgId)
       .eq('status', 'sent')
       .order('sent_at', { ascending: false, nullsFirst: false })
       .limit(10),
     supabase
       .from('email_replies')
-      .select('id, body, ai_draft_status, received_at, lead_id, leads(first_name, last_name, company)')
+      .select('id, body, ai_draft_status, received_at, lead_id, leads(name, first_name, last_name, company)')
       .eq('organization_id', orgId)
       .order('received_at', { ascending: false })
       .limit(10),
     supabase
       .from('leads')
-      .select('id, first_name, last_name, company, updated_at')
+      .select('id, name, first_name, last_name, company, updated_at')
       .eq('organization_id', orgId)
       .eq('status', 'meeting_booked')
       .order('updated_at', { ascending: false })
@@ -105,9 +105,10 @@ export async function getDashboard(userId: string, orgId: string) {
       .select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId)
       .eq('status', 'queued'),
+    // agent_configs may not exist yet if onboarding was skipped — default gracefully below
     supabase
       .from('agent_configs')
-      .select('meeting_target, booking_link')
+      .select('agent_name, meeting_target, booking_link')
       .eq('organization_id', orgId)
       .maybeSingle(),
     supabase
@@ -118,7 +119,7 @@ export async function getDashboard(userId: string, orgId: string) {
       .maybeSingle(),
     supabase
       .from('meetings')
-      .select('id, title, scheduled_at, duration_minutes, join_url, leads(first_name, last_name, title, company)')
+      .select('id, title, scheduled_at, duration_minutes, join_url, leads(name, first_name, last_name, title, company)')
       .eq('organization_id', orgId)
       .eq('status', 'scheduled')
       .gte('scheduled_at', now.toISOString())
@@ -178,7 +179,7 @@ export async function getDashboard(userId: string, orgId: string) {
 
   for (const email of emails) {
     const lead = email.leads as any;
-    const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || 'Unknown';
+    const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || lead?.name || 'Unknown';
     const company = lead?.company || '';
     const time = email.sent_at ?? email.created_at;
     activity.push({
@@ -192,7 +193,7 @@ export async function getDashboard(userId: string, orgId: string) {
 
   for (const reply of replies) {
     const lead = reply.leads as any;
-    const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || 'Unknown';
+    const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || lead?.name || 'Unknown';
     const company = lead?.company || '';
     activity.push({
       type: 'reply',
@@ -204,7 +205,7 @@ export async function getDashboard(userId: string, orgId: string) {
   }
 
   for (const lead of meetingActivity) {
-    const name = [lead.first_name, lead.last_name].filter(Boolean).join(' ') || 'Unknown';
+    const name = [lead.first_name, lead.last_name].filter(Boolean).join(' ') || lead.name || 'Unknown';
     activity.push({
       type: 'meeting',
       text: `Meeting booked with ${name}${lead.company ? ` · ${lead.company}` : ''}`,
@@ -267,6 +268,7 @@ export async function getDashboard(userId: string, orgId: string) {
       firstName: userResult.data?.first_name ?? '',
       lastName: userResult.data?.last_name ?? '',
     },
+    agentName: agentResult.data?.agent_name ?? 'Nexo',
     kpis: {
       emailsSent,
       replies: replyCount,
@@ -292,7 +294,7 @@ export async function getDashboard(userId: string, orgId: string) {
       durationMinutes: nextMeeting.duration_minutes,
       joinUrl: nextMeeting.join_url,
       attendee: {
-        name: [nextMeetingLead?.first_name, nextMeetingLead?.last_name].filter(Boolean).join(' ') || 'Guest',
+        name: [nextMeetingLead?.first_name, nextMeetingLead?.last_name].filter(Boolean).join(' ') || nextMeetingLead?.name || 'Guest',
         title: nextMeetingLead?.title ?? '',
         company: nextMeetingLead?.company ?? '',
       },
@@ -304,7 +306,7 @@ export async function getAnalytics(orgId: string) {
   const now = new Date();
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-  const [emailsResult, repliesResult, leadsResult] = await Promise.all([
+  const [emailsResult, repliesResult, leadsResult, callsResult] = await Promise.all([
     supabase
       .from('email_messages')
       .select('id, status, sent_at, created_at')
@@ -320,11 +322,20 @@ export async function getAnalytics(orgId: string) {
       .from('leads')
       .select('id, status, score, created_at')
       .eq('organization_id', orgId),
+    supabase
+      .from('calls')
+      .select('id, status, disposition')
+      .eq('organization_id', orgId),
   ]);
 
   const emails = emailsResult.data ?? [];
   const replies = repliesResult.data ?? [];
   const leads = leadsResult.data ?? [];
+  const calls = callsResult.data ?? [];
+
+  const totalCalls = calls.length;
+  const answeredCalls = calls.filter(c => !['queued', 'failed', 'no_answer'].includes(c.status)).length;
+  const callMeetings = calls.filter(c => c.disposition === 'meeting_booked').length;
 
   const totalEmails = emails.length;
   const totalReplies = replies.length;
@@ -353,7 +364,10 @@ export async function getAnalytics(orgId: string) {
     emailed: emails.length,
     replied: replies.length,
     meetingsBooked: totalMeetings,
-    closed: leads.filter(l => l.status === 'won').length,
+    // leads.status has no 'won'/closed-deal concept yet (CRM concepts are
+    // deferred to v0.2 per the PRD) — hardcoded to 0 rather than filtering
+    // on a status value the leads table's CHECK constraint never allows.
+    closed: 0,
   };
 
   return {
@@ -366,6 +380,14 @@ export async function getAnalytics(orgId: string) {
     dailyMeetings,
     dayLabels,
     funnel,
+    calls: {
+      total: totalCalls,
+      answered: answeredCalls,
+      answerRate: totalCalls > 0 ? ((answeredCalls / totalCalls) * 100).toFixed(1) : '0',
+      meetingsBooked: callMeetings,
+      voicemail: calls.filter(c => c.status === 'voicemail').length,
+      failed: calls.filter(c => c.status === 'failed').length,
+    },
   };
 }
 

@@ -26,9 +26,54 @@ async function getGmailCredentials(organizationId: string) {
   };
 }
 
+// There's no org-level timezone column — only campaigns.timezone, which is
+// per-campaign — so this uses the org's most recently created campaign's
+// timezone as a stand-in for "the org's timezone", falling back to the same
+// default campaigns.timezone itself defaults to when the org has none yet.
+async function getOrgTimezone(organizationId: string): Promise<string> {
+  const { data } = await supabase
+    .from('campaigns')
+    .select('timezone')
+    .eq('organization_id', organizationId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return data?.timezone ?? 'America/New_York';
+}
+
+function getTimezoneOffsetMinutes(timeZone: string, date: Date): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(date).reduce((acc, p) => {
+    if (p.type !== 'literal') acc[p.type] = p.value;
+    return acc;
+  }, {} as Record<string, string>);
+
+  const asUtc = Date.UTC(
+    Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+    Number(parts.hour), Number(parts.minute), Number(parts.second),
+  );
+  return (asUtc - date.getTime()) / 60_000;
+}
+
+// Computes the UTC instant of local midnight in `timeZone`, for the day
+// `reference` falls on. Recomputes the offset from `reference` itself
+// (rather than assuming a fixed UTC offset) so this stays correct across
+// DST transitions.
+export function startOfDayUtcForTimezone(timeZone: string, reference = new Date()): Date {
+  const offsetMinutes = getTimezoneOffsetMinutes(timeZone, reference);
+  const shifted = new Date(reference.getTime() + offsetMinutes * 60_000);
+  shifted.setUTCHours(0, 0, 0, 0);
+  return new Date(shifted.getTime() - offsetMinutes * 60_000);
+}
+
 async function getTodaySentCount(organizationId: string) {
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
+  const timezone = await getOrgTimezone(organizationId);
+  const startOfDay = startOfDayUtcForTimezone(timezone);
 
   const { count, error } = await supabase
     .from('email_messages')
@@ -66,6 +111,18 @@ export async function checkSendCap(organizationId: string) {
   };
 }
 
+// email_messages has a unique index on (campaign_id, lead_id, step_number),
+// meant to stop the same sequence step being sent twice. A reply isn't a
+// sequence step at all, but it still has to satisfy that constraint - reusing
+// step_number 1 collides with the lead's original campaign email every time,
+// so this finds the next free number for that lead/campaign pair instead.
+export async function getNextStepNumber(leadId: string, campaignId: string | null) {
+  let query = supabase.from('email_messages').select('step_number').eq('lead_id', leadId);
+  query = campaignId ? query.eq('campaign_id', campaignId) : query.is('campaign_id', null);
+  const { data } = await query.order('step_number', { ascending: false }).limit(1);
+  return (data?.[0]?.step_number ?? 0) + 1;
+}
+
 export async function approveAiDraftReply(organizationId: string, replyId: string, editedBody?: string) {
   const { data: reply, error } = await supabase
     .from('email_replies')
@@ -83,13 +140,15 @@ export async function approveAiDraftReply(organizationId: string, replyId: strin
     ? originalMessage.subject
     : `Re: ${originalMessage?.subject || 'Your message'}`;
 
+  const nextStepNumber = await getNextStepNumber(reply.lead_id, originalMessage?.campaign_id ?? null);
+
   const { data: queued, error: queueError } = await supabase
     .from('email_messages')
     .insert({
       organization_id: organizationId,
       campaign_id: originalMessage?.campaign_id ?? null,
       lead_id: reply.lead_id,
-      step_number: 1,
+      step_number: nextStepNumber,
       subject,
       body: approvedBody,
       gmail_thread_id: originalMessage?.gmail_thread_id ?? null,
@@ -197,6 +256,15 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
     `[send-email] Loaded message ${emailMessageId}: campaign=${msg.campaign_id ?? 'none'}, lead=${msg.lead_id ?? 'none'}, step=${msg.step_number ?? 1}, status=${msg.status}`
   );
 
+  // If this message already sent successfully, never send it again. Without
+  // this, a job retried after the Gmail send already succeeded (e.g. a later
+  // step in this same function throwing, or any transient BullMQ retry) would
+  // silently send a real duplicate email with no guard against it.
+  if (msg.status === 'sent') {
+    console.log(`[send-email] Message ${emailMessageId} already sent (gmailMessageId=${msg.gmail_message_id}), skipping duplicate send`);
+    return { success: true, alreadySent: true, gmailMessageId: msg.gmail_message_id };
+  }
+
   const toEmail = msg.leads?.email;
   if (!toEmail) {
     console.warn(`[send-email] Message ${emailMessageId} cannot send because lead ${msg.lead_id ?? 'unknown'} has no email address`);
@@ -204,12 +272,18 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
   }
 
   const stepNumber = msg.step_number ?? 1;
-  if (stepNumber > 1 && STOP_SEQUENCE_STATUSES.includes(msg.leads?.status)) {
+  // Only genuine automated sequence steps (step 2/3 follow-ups) carry a
+  // sequence_step_id - these two guards exist to stop those follow-ups once
+  // a lead has responded or the campaign's been paused. An approved reply
+  // reuses a step_number > 1 just to satisfy the DB's uniqueness constraint,
+  // but it's a direct human-approved send, not a stale automated follow-up,
+  // so it must never be silently skipped by either check.
+  if (msg.sequence_step_id && STOP_SEQUENCE_STATUSES.includes(msg.leads?.status)) {
     await markEmailSkipped(emailMessageId);
     return { success: false, reason: 'sequence_stopped', leadStatus: msg.leads?.status };
   }
 
-  if (stepNumber > 1 && msg.campaigns?.status !== 'active') {
+  if (msg.sequence_step_id && msg.campaigns?.status !== 'active') {
     await markEmailSkipped(emailMessageId);
     return { success: false, reason: 'campaign_not_active', campaignStatus: msg.campaigns?.status };
   }
@@ -249,7 +323,23 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
       toEmail,
       subject,
       body,
-      { threadId: msg.gmail_thread_id },
+      {
+        threadId: msg.gmail_thread_id,
+        onTokenRefresh: (tokens) => {
+          void supabase
+            .from('connected_accounts')
+            .update({
+              access_token: tokens.access_token,
+              expires_at: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('organization_id', organizationId)
+            .eq('provider', 'gmail')
+            .then(({ error }) => {
+              if (error) console.error(`[send-email] Failed to persist refreshed Gmail token for org ${organizationId}:`, error.message);
+            });
+        },
+      },
     );
 
     await supabase

@@ -1,5 +1,5 @@
 import { Queue } from 'bullmq';
-import { redisConnection } from '../lib/redis';
+import { queueConnection } from '../lib/redis';
 
 export interface EnrichLeadsJobData {
   leadIds:        string[];
@@ -7,7 +7,7 @@ export interface EnrichLeadsJobData {
   organizationId: string;
 }
 
-const enrichLeadsQueue = new Queue<EnrichLeadsJobData, any, string>('enrich-leads', { connection: redisConnection });
+const enrichLeadsQueue = new Queue<EnrichLeadsJobData, any, string>('enrich-leads', { connection: queueConnection });
 
 export async function enqueueEnrichLeads(data: EnrichLeadsJobData) {
   return enrichLeadsQueue.add('enrich-leads', data, {

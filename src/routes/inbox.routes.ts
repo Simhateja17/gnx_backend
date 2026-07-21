@@ -30,7 +30,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response, next: NextFunct
 
     const { data: replies, error } = await supabase
       .from('email_replies')
-      .select('id, body, ai_draft_status, received_at, email_message_id, lead_id, leads(first_name, last_name, company), email_messages(subject)')
+      .select('id, body, ai_draft_status, received_at, email_message_id, lead_id, leads(name, first_name, last_name, company), email_messages(subject)')
       .eq('organization_id', orgId)
       .order('received_at', { ascending: false })
       .limit(50);
@@ -40,7 +40,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response, next: NextFunct
     const threads = (replies ?? []).map(reply => {
       const lead = reply.leads as any;
       const msg = reply.email_messages as any;
-      const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || 'Unknown';
+      const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || lead?.name || 'Unknown';
       return {
         id: reply.id,
         leadId: reply.lead_id,
@@ -66,7 +66,7 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response, next: NextFu
     const orgId = getOrgId(req);
     const { data: reply, error } = await supabase
       .from('email_replies')
-      .select('id, body, ai_draft_reply, ai_draft_status, received_at, email_message_id, lead_id, leads(first_name, last_name, company, email, title), email_messages(subject, body, sent_at)')
+      .select('id, body, ai_draft_reply, ai_draft_status, received_at, email_message_id, lead_id, leads(name, first_name, last_name, company, email, title), email_messages(subject, body, sent_at)')
       .eq('organization_id', orgId)
       .eq('id', req.params.id)
       .single();
@@ -74,14 +74,6 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response, next: NextFu
     if (error || !reply) throw new AppError(404, 'Thread not found');
 
     res.json(reply);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post('/:id/reply', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
-  try {
-    res.json({ todo: 'send manual reply', id: req.params.id });
   } catch (err) {
     next(err);
   }

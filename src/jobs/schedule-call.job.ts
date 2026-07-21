@@ -1,5 +1,5 @@
 import { Queue } from 'bullmq';
-import { redisConnection } from '../lib/redis';
+import { queueConnection } from '../lib/redis';
 
 export interface ScheduleCallJobData {
   leadId:         string;
@@ -9,7 +9,7 @@ export interface ScheduleCallJobData {
   fromNumber:     string;
 }
 
-const scheduleCallQueue = new Queue<ScheduleCallJobData, any, string>('schedule-call', { connection: redisConnection });
+const scheduleCallQueue = new Queue<ScheduleCallJobData, any, string>('schedule-call', { connection: queueConnection });
 
 export async function enqueueScheduleCall(data: ScheduleCallJobData, delayMs = 0) {
   return scheduleCallQueue.add('schedule-call', data, {

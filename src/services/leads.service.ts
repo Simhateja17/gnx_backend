@@ -4,6 +4,8 @@ import { redis } from '../lib/redis';
 import { AppError } from '../types';
 import { mapRow } from '../lib/csv-parser';
 import { sendEmail } from './email.service';
+import { enqueueInitialEmailStepIfActive } from './campaigns.service';
+import { APOLLO_ENRICHMENT_CAP } from '../config/constants';
 import type { ApolloEnrichInput, ApolloSearchInput, CsvUploadInput, LeadCreateInput } from '../schemas/leads.schema';
 import type { CsvImportJobData, CsvImportProgress } from '../jobs/csv-import.job';
 
@@ -169,6 +171,11 @@ export async function createLead(orgId: string, input: LeadCreateInput) {
     .single();
 
   if (error) throw new AppError(500, 'Failed to create lead', error);
+
+  if (input.campaignId) {
+    await enqueueInitialEmailStepIfActive(orgId, input.campaignId);
+  }
+
   return toApiLead(data as unknown as LeadRow);
 }
 
@@ -239,6 +246,11 @@ async function saveApolloPeople(orgId: string, input: ApolloSearchInput, people:
     .select(LEAD_COLUMNS);
 
   if (error) throw new AppError(500, 'Failed to save Apollo leads', error);
+
+  if (input.campaignId && (data?.length ?? 0) > 0) {
+    await enqueueInitialEmailStepIfActive(orgId, input.campaignId);
+  }
+
   return {
     saved: ((data ?? []) as unknown as LeadRow[]).map(toApiLead),
     inserted: data?.length ?? 0,
@@ -292,24 +304,49 @@ export async function searchApollo(orgId: string, input: ApolloSearchInput) {
   };
 }
 
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const URL_PATTERN = /^https?:\/\//i;
+
 export async function uploadCsvLeads(orgId: string, input: CsvUploadInput) {
-  const records = input.rows.map(row => toLeadRecord(
-    orgId,
-    {
-      campaignId: input.campaignId,
-      source: 'csv',
-      firstName: row.firstName,
-      lastName: row.lastName,
-      name: row.name,
-      title: row.title,
-      company: row.company,
-      email: row.email,
-      phone: row.phone,
-      location: row.location,
-      linkedinUrl: row.linkedinUrl,
-    },
-    row.rawData
-  ));
+  const records: ReturnType<typeof toLeadRecord>[] = [];
+  const errors: Array<{ row: number; message: string }> = [];
+
+  input.rows.forEach((row, index) => {
+    if (row.email && !EMAIL_PATTERN.test(row.email)) {
+      errors.push({ row: index + 1, message: `Invalid email format: "${row.email}"` });
+      return;
+    }
+    if (row.linkedinUrl && !URL_PATTERN.test(row.linkedinUrl)) {
+      errors.push({ row: index + 1, message: `Invalid LinkedIn URL: "${row.linkedinUrl}"` });
+      return;
+    }
+    if (!row.name && !row.firstName && !row.lastName && !row.email && !row.company) {
+      errors.push({ row: index + 1, message: 'Row has no identifiable data (no name, email, or company)' });
+      return;
+    }
+
+    records.push(toLeadRecord(
+      orgId,
+      {
+        campaignId: input.campaignId,
+        source: 'csv',
+        firstName: row.firstName,
+        lastName: row.lastName,
+        name: row.name,
+        title: row.title,
+        company: row.company,
+        email: row.email,
+        phone: row.phone,
+        location: row.location,
+        linkedinUrl: row.linkedinUrl,
+      },
+      row.rawData
+    ));
+  });
+
+  if (records.length === 0) {
+    return { inserted: 0, skipped: errors.length, errors, items: [] };
+  }
 
   const { data, error } = await supabase
     .from('leads')
@@ -318,8 +355,14 @@ export async function uploadCsvLeads(orgId: string, input: CsvUploadInput) {
 
   if (error) throw new AppError(500, 'Failed to upload CSV leads', error);
 
+  if (input.campaignId && (data?.length ?? 0) > 0) {
+    await enqueueInitialEmailStepIfActive(orgId, input.campaignId);
+  }
+
   return {
     inserted: data?.length ?? 0,
+    skipped: errors.length,
+    errors,
     items: ((data ?? []) as unknown as LeadRow[]).map(toApiLead),
   };
 }
@@ -338,6 +381,38 @@ export async function deleteLead(orgId: string, id: string) {
   return { success: true };
 }
 
+// Apollo enrichment calls are real, billed API requests. Cap them per campaign
+// (or per org, for leads with no campaign) at whichever is smaller: the
+// campaign's own max_leads or the platform-wide APOLLO_ENRICHMENT_CAP, so a
+// misconfigured campaign can't exceed the cost-control assumption in the PRD.
+export async function checkApolloEnrichmentCap(orgId: string, campaignId: string | null) {
+  let cap: number = APOLLO_ENRICHMENT_CAP;
+
+  if (campaignId) {
+    const { data: campaign } = await supabase
+      .from('campaigns')
+      .select('max_leads')
+      .eq('organization_id', orgId)
+      .eq('id', campaignId)
+      .maybeSingle();
+    if (campaign?.max_leads) cap = Math.min(campaign.max_leads, APOLLO_ENRICHMENT_CAP);
+  }
+
+  let query = supabase
+    .from('leads')
+    .select('id', { count: 'exact', head: true })
+    .eq('organization_id', orgId)
+    .not('raw_data', 'is', null);
+  query = campaignId ? query.eq('campaign_id', campaignId) : query.is('campaign_id', null);
+
+  const { count, error } = await query;
+  if (error) throw new AppError(500, 'Failed to check Apollo enrichment cap', error);
+
+  if ((count ?? 0) >= cap) {
+    throw new AppError(429, `Apollo enrichment cap reached (${cap} leads) for this ${campaignId ? 'campaign' : 'organization'}`);
+  }
+}
+
 export async function enrichLead(orgId: string, input: ApolloEnrichInput) {
   const { data: lead, error: fetchError } = await supabase
     .from('leads')
@@ -349,6 +424,8 @@ export async function enrichLead(orgId: string, input: ApolloEnrichInput) {
   if (fetchError || !lead) throw new AppError(404, 'Lead not found');
 
   const row = lead as unknown as LeadRow;
+  await checkApolloEnrichmentCap(orgId, row.campaign_id);
+
   const enrichBody: Record<string, unknown> = {};
 
   if (row.apollo_id) {
@@ -536,10 +613,80 @@ export async function sendLeadNow(orgId: string, id: string) {
   };
 }
 
+export async function enrichLeads(
+  organizationId: string,
+  leadIds: string[],
+  campaignId: string,
+) {
+  await checkApolloEnrichmentCap(organizationId, campaignId || null);
+
+  const { data: leads, error } = await supabase
+    .from('leads')
+    .select('id, email, first_name, last_name, company')
+    .eq('organization_id', organizationId)
+    .in('id', leadIds);
+
+  if (error) throw new AppError(500, 'Failed to fetch leads for enrichment');
+  if (!leads || leads.length === 0) return { enriched: 0 };
+
+  let enriched = 0;
+
+  for (const lead of leads) {
+    if (!lead.email) continue;
+
+    try {
+      const response = await fetch('https://api.apollo.io/api/v1/people/match', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': env.APOLLO_API_KEY,
+        },
+        body: JSON.stringify({
+          email: lead.email,
+          first_name: lead.first_name ?? undefined,
+          last_name: lead.last_name ?? undefined,
+          organization_name: lead.company ?? undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        console.warn(`[enrich-leads] Apollo match failed for lead ${lead.id}: ${response.status}`);
+        continue;
+      }
+
+      const data = await response.json() as { person?: any };
+      const person = data.person;
+      if (!person) continue;
+
+      const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      if (person.title && !lead.first_name) patch.title = person.title;
+      if (person.linkedin_url) patch.linkedin_url = person.linkedin_url;
+      if (person.phone_numbers?.[0]?.sanitized_number) patch.phone = person.phone_numbers[0].sanitized_number;
+      if (person.city || person.state || person.country) {
+        patch.location = [person.city, person.state, person.country].filter(Boolean).join(', ');
+      }
+      if (person.organization?.name && !lead.company) patch.company = person.organization.name;
+      patch.raw_data = person;
+
+      await supabase.from('leads').update(patch).eq('id', lead.id);
+      enriched++;
+    } catch (err: any) {
+      console.error(`[enrich-leads] Error enriching lead ${lead.id}:`, err.message);
+      await supabase
+        .from('leads')
+        .update({ status: 'enrichment_failed', updated_at: new Date().toISOString() })
+        .eq('id', lead.id);
+    }
+  }
+
+  return { enriched };
+}
+
 export async function listLeadsFiltered(orgId: string, filters: {
   search?: string;
   status?: string;
   source?: string;
+  campaignId?: string;
   page?: number;
   perPage?: number;
 }) {
@@ -558,6 +705,9 @@ export async function listLeadsFiltered(orgId: string, filters: {
   }
   if (filters.source) {
     query = query.eq('source', filters.source);
+  }
+  if (filters.campaignId) {
+    query = query.eq('campaign_id', filters.campaignId);
   }
   if (filters.search) {
     const term = `%${filters.search}%`;

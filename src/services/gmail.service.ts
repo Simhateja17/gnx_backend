@@ -2,7 +2,9 @@ import { google } from 'googleapis';
 import { supabase } from '../lib/supabase';
 import { enqueueSendEmail } from '../jobs/send-email.job';
 import { generateReply } from './ai.service';
+import { getNextStepNumber } from './email.service';
 import { AppError } from '../types';
+import { env } from '../config/env';
 
 const UNSUBSCRIBE_PATTERNS = [
   /\bunsubscribe\b/i,
@@ -14,7 +16,7 @@ const UNSUBSCRIBE_PATTERNS = [
 ];
 
 function createOAuth2Client(accessToken: string, refreshToken: string) {
-  const oauth2 = new google.auth.OAuth2();
+  const oauth2 = new google.auth.OAuth2(env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REDIRECT_URI);
   oauth2.setCredentials({ access_token: accessToken, refresh_token: refreshToken });
   return oauth2;
 }
@@ -49,43 +51,55 @@ export async function pollInbox(organizationId: string, connectedAccountId: stri
     .eq('organization_id', organizationId)
     .not('gmail_thread_id', 'is', null);
 
-  const threadIds = [...new Set((trackedThreads ?? []).map(t => t.gmail_thread_id).filter(Boolean))];
+  const threadIds = [...new Set((trackedThreads ?? []).map(t => t.gmail_thread_id).filter(Boolean))] as string[];
   if (threadIds.length === 0) return { newReplies: 0 };
+
+  // Hoisted out of the per-thread loop below: these previously re-ran on
+  // every thread iteration (existingReplyIds org-wide, ourMessageIds
+  // per-thread), turning inbox polling into an N+1 query pattern that gets
+  // slower as an org's tracked thread count grows. Fetched once here instead.
+  const { data: existingReplies } = await supabase
+    .from('email_replies')
+    .select('gmail_message_id')
+    .eq('organization_id', organizationId);
+  const knownIds = new Set((existingReplies ?? []).map(r => r.gmail_message_id));
+
+  const { data: allOurMessages } = await supabase
+    .from('email_messages')
+    .select('id, lead_id, campaign_id, subject, gmail_thread_id, gmail_message_id, created_at')
+    .eq('organization_id', organizationId)
+    .in('gmail_thread_id', threadIds)
+    .order('created_at', { ascending: true });
+
+  const ourIdsByThread = new Map<string, Set<string>>();
+  const originalMsgByThread = new Map<string, { id: string; lead_id: string; campaign_id: string | null; subject: string | null; gmail_thread_id: string | null }>();
+  for (const m of allOurMessages ?? []) {
+    if (!m.gmail_thread_id) continue;
+    if (m.gmail_message_id) {
+      if (!ourIdsByThread.has(m.gmail_thread_id)) ourIdsByThread.set(m.gmail_thread_id, new Set());
+      ourIdsByThread.get(m.gmail_thread_id)!.add(m.gmail_message_id);
+    }
+    // Rows are ordered oldest-first, so the first one seen per thread is the original message.
+    if (!originalMsgByThread.has(m.gmail_thread_id)) originalMsgByThread.set(m.gmail_thread_id, m);
+  }
 
   let newReplies = 0;
 
   for (const threadId of threadIds) {
     try {
-      const thread = await gmail.users.threads.get({ userId: 'me', id: threadId! });
+      const thread = await gmail.users.threads.get({ userId: 'me', id: threadId });
       const messages = thread.data.messages ?? [];
-
-      const { data: existingReplyIds } = await supabase
-        .from('email_replies')
-        .select('gmail_message_id')
-        .eq('organization_id', organizationId);
-      const knownIds = new Set((existingReplyIds ?? []).map(r => r.gmail_message_id));
-
-      const { data: ourMessageIds } = await supabase
-        .from('email_messages')
-        .select('gmail_message_id')
-        .eq('gmail_thread_id', threadId);
-      const ourIds = new Set((ourMessageIds ?? []).map(m => m.gmail_message_id));
+      const ourIds = ourIdsByThread.get(threadId) ?? new Set();
+      const originalMsg = originalMsgByThread.get(threadId);
 
       for (const message of messages) {
         const msgId = message.id;
         if (!msgId || ourIds.has(msgId) || knownIds.has(msgId)) continue;
 
-        const body = extractPlainTextBody(message);
+        const rawBody = extractPlainTextBody(message);
+        if (!rawBody) continue;
+        const body = stripQuotedText(rawBody);
         if (!body) continue;
-
-        const { data: originalMsg } = await supabase
-          .from('email_messages')
-          .select('id, lead_id, campaign_id, subject, gmail_thread_id')
-          .eq('gmail_thread_id', threadId)
-          .eq('organization_id', organizationId)
-          .order('created_at', { ascending: true })
-          .limit(1)
-          .single();
 
         if (!originalMsg) continue;
         const unsubscribed = isUnsubscribeReply(body);
@@ -150,6 +164,7 @@ async function saveAiDraftReply(input: {
     const subject = originalMessage.subject?.toLowerCase().startsWith('re:')
       ? originalMessage.subject
       : `Re: ${originalMessage.subject || 'Your message'}`;
+    const nextStepNumber = await getNextStepNumber(originalMessage.lead_id, originalMessage.campaign_id);
 
     const { data: replyMessage, error: messageError } = await supabase
       .from('email_messages')
@@ -157,7 +172,7 @@ async function saveAiDraftReply(input: {
         organization_id: organizationId,
         campaign_id: originalMessage.campaign_id,
         lead_id: originalMessage.lead_id,
-        step_number: 1,
+        step_number: nextStepNumber,
         subject,
         body: generated.body,
         gmail_thread_id: originalMessage.gmail_thread_id,
@@ -193,6 +208,21 @@ async function saveAiDraftReply(input: {
 
 function isUnsubscribeReply(body: string) {
   return UNSUBSCRIBE_PATTERNS.some(pattern => pattern.test(body));
+}
+
+// Plain-text replies include the entire original message quoted below the
+// new text (lines starting with '>', preceded by an 'On ... wrote:' line).
+// Since every outbound email includes a CAN-SPAM 'reply "unsubscribe"'
+// footer, leaving the quote in would make isUnsubscribeReply (and the AI
+// reply-draft context) see that footer as if the prospect wrote it,
+// misreading every single reply as an unsubscribe request.
+function stripQuotedText(body: string): string {
+  const lines = body.split(/\r?\n/);
+  const quoteStartIndex = lines.findIndex(
+    line => /^>/.test(line.trim()) || /^On .+wrote:\s*$/.test(line.trim())
+  );
+  const kept = quoteStartIndex === -1 ? lines : lines.slice(0, quoteStartIndex);
+  return kept.join('\n').trim();
 }
 
 function extractPlainTextBody(message: any): string | null {

@@ -35,6 +35,24 @@ function getToneInstruction(tone: string): string {
   return TONE_DESCRIPTIONS[tone] || TONE_DESCRIPTIONS.consultative;
 }
 
+const HOOK_STYLE_DESCRIPTIONS: Record<string, string> = {
+  pain_based:
+    'Open with the single biggest pain point this prospect likely feels in their role - a problem-first hook.',
+  insight_based:
+    'Open with a relevant data point, statistic, or industry trend - an insight-first hook.',
+  social_proof:
+    'Open by referencing how a similar company or customer achieved a result with us - a social-proof hook.',
+  personalized_signal:
+    'Open by referencing a specific, timely signal about their company (recent news, a new hire, funding round, product launch) - a personalized-signal hook.',
+  question_led:
+    'Open with a sharp, thought-provoking question relevant to their role - a question-led hook.',
+};
+
+function getHookInstruction(hookStyle: string | null | undefined): string | null {
+  if (!hookStyle) return null;
+  return HOOK_STYLE_DESCRIPTIONS[hookStyle] || null;
+}
+
 function sanitizeText(text: string): string {
   return text
     .replace(/—/g, '-')
@@ -105,19 +123,20 @@ function buildEmailSystemPrompt(
   stepContext?: string | null,
 ): string {
   const toneInstruction = getToneInstruction(tone);
+  const hookInstruction = getHookInstruction(agentConfig.hook_style);
 
   const baseContext = `You are ${agentConfig.agent_name}, an AI sales agent.
 
 PRODUCT: ${agentConfig.product_description}
 VALUE PROPOSITION: ${agentConfig.value_proposition}
-${agentConfig.objections ? `COMMON OBJECTIONS TO ADDRESS: ${agentConfig.objections}` : ''}
+${agentConfig.pain_points ? `BUYER PAIN POINTS TO ADDRESS: ${agentConfig.pain_points}` : ''}
 ${agentConfig.booking_link ? `BOOKING LINK: ${agentConfig.booking_link}` : ''}
 ${campaign.prompt_context ? `CAMPAIGN CONTEXT: ${campaign.prompt_context}` : ''}
 
 TONE: ${toneInstruction}`;
 
   const stepInstructions: Record<number, string> = {
-    1: `Write a cold outreach intro email. Personalize it using the prospect's name, title, and company. Mention a specific pain point or opportunity relevant to their role. Keep it under 150 words. Do NOT include a subject line prefix like "Subject:". End with a soft call to action (question or invite).`,
+    1: `Write a cold outreach intro email. Personalize it using the prospect's name, title, and company.${hookInstruction ? ` OPENING LINE: ${hookInstruction}` : ''} Keep it under 150 words. Do NOT include a subject line prefix like "Subject:". End with a soft call to action (question or invite).`,
     2: `Write a follow-up email referencing the first email that was sent. Do NOT repeat the same pitch. Add a new angle, a brief case study mention, or a relevant insight. Keep it under 120 words. Assume the prospect saw but didn't reply to the first email.`,
     3: `Write a final breakup email. Be brief (under 80 words), acknowledge you don't want to be a nuisance, and give one last reason to connect.${agentConfig.booking_link ? ' Include the booking link as a final CTA.' : ''} Make it easy for them to say "not now" without burning the bridge.`,
   };
@@ -225,7 +244,7 @@ function buildReplySystemPrompt(agentConfig: any, hasHistory: boolean): string {
 
 PRODUCT: ${agentConfig.product_description}
 VALUE PROPOSITION: ${agentConfig.value_proposition}
-${agentConfig.objections ? `COMMON OBJECTIONS TO ADDRESS: ${agentConfig.objections}` : ''}
+${agentConfig.pain_points ? `BUYER PAIN POINTS TO ADDRESS: ${agentConfig.pain_points}` : ''}
 ${agentConfig.booking_link ? `BOOKING LINK: ${agentConfig.booking_link}` : ''}
 
 TONE: ${toneInstruction}
@@ -369,7 +388,7 @@ COMPLIANCE - YOU MUST FOLLOW THESE RULES:
 ABOUT YOU:
 - Product: ${agentConfig.product_description}
 - Value Proposition: ${agentConfig.value_proposition}
-${agentConfig.objections ? `- Common Objections: ${agentConfig.objections}` : ''}
+${agentConfig.pain_points ? `- Buyer Pain Points to Address: ${agentConfig.pain_points}` : ''}
 ${campaignContext}
 
 TONE: ${toneInstruction}

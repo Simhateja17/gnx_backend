@@ -47,6 +47,14 @@ export async function submitOnboarding(orgId: string, data: Partial<OnboardingIn
     if (error) throw new AppError(500, 'Failed to create agent config', error);
   }
 
+  if (data.company) {
+    const { error } = await supabase
+      .from('organizations')
+      .update({ name: data.company })
+      .eq('id', orgId);
+    if (error) throw new AppError(500, 'Failed to update organisation name', error);
+  }
+
   return { success: true };
 }
 

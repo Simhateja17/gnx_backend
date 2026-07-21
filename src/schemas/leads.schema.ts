@@ -27,11 +27,27 @@ export const apolloSearchSchema = z.object({
   perPage: z.coerce.number().int().min(1).max(100).default(25),
 });
 
+// Deliberately permissive: a single malformed row (e.g. a bad email) must not
+// reject the whole batch. Per-row correctness (email format, etc.) is checked
+// row-by-row in uploadCsvLeads, which skips bad rows instead of failing everything.
+const csvRowSchema = z.object({
+  campaignId: z.string().uuid().optional(),
+  apolloId: z.string().trim().max(240).optional().or(z.literal('')),
+  firstName: z.string().trim().max(240).optional().or(z.literal('')),
+  lastName: z.string().trim().max(240).optional().or(z.literal('')),
+  name: z.string().trim().max(240).optional().or(z.literal('')),
+  title: z.string().trim().max(240).optional().or(z.literal('')),
+  company: z.string().trim().max(240).optional().or(z.literal('')),
+  email: z.string().trim().max(240).optional().or(z.literal('')),
+  phone: z.string().trim().max(240).optional().or(z.literal('')),
+  location: z.string().trim().max(240).optional().or(z.literal('')),
+  linkedinUrl: z.string().trim().max(500).optional().or(z.literal('')),
+  rawData: z.record(z.unknown()).optional(),
+});
+
 export const csvUploadSchema = z.object({
   campaignId: z.string().uuid().optional(),
-  rows: z.array(leadCreateSchema.omit({ source: true }).extend({
-    rawData: z.record(z.unknown()).optional(),
-  })).min(1).max(1000),
+  rows: z.array(csvRowSchema).min(1).max(1000),
 });
 
 export const apolloEnrichSchema = z.object({
