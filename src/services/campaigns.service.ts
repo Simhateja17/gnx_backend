@@ -4,13 +4,27 @@ import { enqueueScheduleCall } from '../jobs/schedule-call.job';
 import { posthog } from '../lib/posthog';
 import { AppError } from '../types';
 import { ensureAgentConfig } from './agent-config.service';
+import { parsePromptContext, serializePromptContext } from '../lib/prompt-context';
 import type { AssignLeadsInput, CampaignCreateInput, CampaignUpdateInput, SequenceStepsUpsertInput } from '../schemas/campaigns.schema';
+
+type CampaignChannel = 'email' | 'voice' | 'both';
+
+// 'both' runs the email sequence and the calling cadence off the same campaign,
+// so every channel branch has to ask "does this campaign use email/voice?"
+// rather than comparing the column to a single value.
+function usesEmail(channel: string) {
+  return channel === 'email' || channel === 'both';
+}
+
+function usesVoice(channel: string) {
+  return channel === 'voice' || channel === 'both';
+}
 
 type CampaignRow = {
   id: string;
   organization_id: string;
   name: string;
-  channel: 'email' | 'voice';
+  channel: CampaignChannel;
   status: 'draft' | 'active' | 'paused' | 'completed';
   agent_config_id: string | null;
   prompt_context: string | null;
@@ -37,6 +51,10 @@ type CampaignStats = {
 
 const STOP_SEQUENCE_STATUSES = ['engaged', 'meeting_booked', 'not_interested', 'unsubscribed'];
 
+// Calling is narrower than emailing: an 'engaged' lead is still worth a call,
+// so voice only stops on the terminal statuses.
+const STOP_CALLING_STATUSES = ['meeting_booked', 'not_interested', 'unsubscribed'];
+
 const CAMPAIGN_COLUMNS = [
   'id',
   'organization_id',
@@ -55,26 +73,6 @@ const CAMPAIGN_COLUMNS = [
   'created_at',
   'updated_at',
 ].join(',');
-
-function parsePromptContext(value: string | null) {
-  if (!value) return { icpSource: '', promptNotes: '' };
-  try {
-    const parsed = JSON.parse(value) as { icpSource?: string; promptNotes?: string };
-    return {
-      icpSource: parsed.icpSource ?? value,
-      promptNotes: parsed.promptNotes ?? '',
-    };
-  } catch {
-    return { icpSource: value, promptNotes: '' };
-  }
-}
-
-function serializePromptContext(data: Partial<CampaignCreateInput>) {
-  return JSON.stringify({
-    icpSource: data.icpSource ?? '',
-    promptNotes: data.promptNotes ?? '',
-  });
-}
 
 function toApiCampaign(row: CampaignRow, stats?: CampaignStats) {
   const prompt = parsePromptContext(row.prompt_context);
@@ -285,10 +283,25 @@ export async function setCampaignStatus(
   if (!currentData) throw new AppError(404, 'Campaign not found');
 
   const current = currentData as unknown as CampaignRow;
-  if (status === 'active' && current.channel === 'email') {
+  const emailEnabled = usesEmail(current.channel);
+  const voiceEnabled = usesVoice(current.channel);
+
+  if (status === 'active' && emailEnabled) {
     const readiness = await getEmailLaunchReadiness(orgId, id);
+    // An email-only campaign with nothing send-ready is a hard error. On a
+    // 'both' campaign the calls can still carry the launch, so only block when
+    // neither channel has anything to work with.
     if (readiness.ready === 0) {
-      throw new AppError(400, 'Campaign has no send-ready leads. Reveal or upload lead emails before launching.', readiness);
+      const callable = voiceEnabled ? await countCallableLeads(orgId, id) : 0;
+      if (callable === 0) {
+        throw new AppError(
+          400,
+          voiceEnabled
+            ? 'Campaign has no send-ready or callable leads. Add lead emails or phone numbers before launching.'
+            : 'Campaign has no send-ready leads. Reveal or upload lead emails before launching.',
+          readiness
+        );
+      }
     }
   }
 
@@ -313,26 +326,35 @@ export async function setCampaignStatus(
     });
   }
 
-  if (status === 'active' && campaign.channel === 'email') {
+  if (status === 'active' && (emailEnabled || voiceEnabled)) {
     try {
-      const queued = await enqueueInitialEmailStep(orgId, id);
-      console.log(`[campaigns] Campaign ${id} launched. Queued ${queued} initial email job(s).`);
-      return { ...campaign, queued };
-    } catch (err) {
-      await supabase
-        .from('campaigns')
-        .update({ status: 'paused', updated_at: new Date().toISOString() })
-        .eq('organization_id', orgId)
-        .eq('id', id);
-      throw err;
-    }
-  }
+      let emailQueued = 0;
+      let voiceQueued = 0;
+      let voiceSkipped = 0;
 
-  if (status === 'active' && campaign.channel === 'voice') {
-    try {
-      const result = await enqueueVoiceCalls(orgId, id, campaign);
-      return { ...campaign, ...result };
+      if (emailEnabled) {
+        emailQueued = await enqueueInitialEmailStep(orgId, id);
+        console.log(`[campaigns] Campaign ${id} launched. Queued ${emailQueued} initial email job(s).`);
+      }
+
+      if (voiceEnabled) {
+        const result = await enqueueVoiceCalls(orgId, id, campaign);
+        voiceQueued = result.queued;
+        voiceSkipped = result.skipped;
+        console.log(`[campaigns] Campaign ${id} launched. Queued ${voiceQueued} call(s), skipped ${voiceSkipped}.`);
+      }
+
+      return {
+        ...campaign,
+        queued: emailQueued + voiceQueued,
+        skipped: voiceSkipped,
+        emailQueued,
+        voiceQueued,
+      };
     } catch (err) {
+      // Roll the campaign back to paused so a partial fan-out (e.g. emails
+      // queued, calls rejected for a missing Retell number) doesn't leave it
+      // sitting active and half-launched.
       await supabase
         .from('campaigns')
         .update({ status: 'paused', updated_at: new Date().toISOString() })
@@ -373,7 +395,7 @@ async function enqueueVoiceCalls(
   if (leadsError) throw new AppError(500, 'Failed to fetch campaign leads', leadsError);
 
   const eligibleLeads = (leads ?? []).filter(
-    lead => lead.phone && !['meeting_booked', 'not_interested', 'unsubscribed'].includes(lead.status),
+    lead => lead.phone && !STOP_CALLING_STATUSES.includes(lead.status),
   );
 
   const skipped = (leads?.length ?? 0) - eligibleLeads.length;
@@ -412,6 +434,23 @@ async function getEmailLaunchReadiness(orgId: string, campaignId: string) {
     missingEmail,
     stopped,
   };
+}
+
+// Mirrors the eligibility filter in enqueueVoiceCalls, so a 'both' campaign
+// can tell whether the calling side has anything to launch with.
+async function countCallableLeads(orgId: string, campaignId: string) {
+  const { data: leads, error } = await supabase
+    .from('leads')
+    .select('id,phone,status')
+    .eq('organization_id', orgId)
+    .eq('campaign_id', campaignId)
+    .not('phone', 'is', null);
+
+  if (error) throw new AppError(500, 'Failed to inspect campaign call readiness', error);
+
+  return (leads ?? []).filter(
+    lead => lead.phone && !STOP_CALLING_STATUSES.includes(lead.status)
+  ).length;
 }
 
 async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
@@ -627,6 +666,6 @@ export async function enqueueInitialEmailStepIfActive(
   campaign?: { status: string; channel: string },
 ) {
   const current = campaign ?? await getCampaign(orgId, campaignId);
-  if (current.status !== 'active' || current.channel !== 'email') return;
+  if (current.status !== 'active' || !usesEmail(current.channel)) return;
   await enqueueInitialEmailStep(orgId, campaignId);
 }
