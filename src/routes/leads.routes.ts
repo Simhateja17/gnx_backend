@@ -7,6 +7,7 @@ import { apolloEnrichSchema, apolloSearchSchema, csvUploadSchema, leadCreateSche
 import { createLead, deleteLead, enrichLead, getCsvImportProgress, listLeads, listLeadsFiltered, searchApollo, sendLeadNow, uploadCsvLeads } from '../services/leads.service';
 import { parseCsv, mapHeaders } from '../lib/csv-parser';
 import { enqueueCsvImport } from '../jobs/csv-import.job';
+import { callLeadNow } from '../services/voice.service';
 import { AppError } from '../types';
 
 const upload = multer({
@@ -144,6 +145,14 @@ router.get('/csv-import/:jobId', async (req: AuthenticatedRequest, res: Response
 router.post('/:id/send-now', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     res.json(await sendLeadNow(getOrgId(req), req.params.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/:id/call-now', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await callLeadNow(getOrgId(req), req.params.id));
   } catch (err) {
     next(err);
   }

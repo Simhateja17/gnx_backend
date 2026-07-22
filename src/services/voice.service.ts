@@ -173,6 +173,62 @@ export async function scheduleCall(
   }
 }
 
+export async function callLeadNow(organizationId: string, leadId: string) {
+  const { data: lead, error: leadError } = await supabase
+    .from('leads')
+    .select('id,campaign_id,phone,status,campaigns(id,channel,voice_mode)')
+    .eq('organization_id', organizationId)
+    .eq('id', leadId)
+    .maybeSingle();
+
+  if (leadError) throw new AppError(500, 'Failed to fetch lead for immediate call', leadError);
+  if (!lead) throw new AppError(404, 'Lead not found');
+  if (!lead.phone) throw new AppError(400, 'Lead has no phone number');
+  if (!lead.campaign_id) throw new AppError(400, 'Lead is not attached to a campaign');
+  if (['meeting_booked', 'not_interested', 'unsubscribed'].includes(lead.status)) {
+    throw new AppError(400, `Lead status is ${lead.status}; calls are stopped for this lead`);
+  }
+
+  const campaign = lead.campaigns as unknown as { channel?: string; voice_mode?: string } | null;
+  if (campaign?.channel !== 'voice') {
+    throw new AppError(400, 'Immediate calling is only available for voice campaigns');
+  }
+  if (campaign.voice_mode !== 'ai') {
+    throw new AppError(400, 'Immediate AI calling is only available for AI voice campaigns');
+  }
+
+  const { data: activeCall, error: activeCallError } = await supabase
+    .from('calls')
+    .select('id')
+    .eq('organization_id', organizationId)
+    .eq('campaign_id', lead.campaign_id)
+    .eq('lead_id', leadId)
+    .in('status', ['queued', 'in_progress'])
+    .limit(1)
+    .maybeSingle();
+
+  if (activeCallError) throw new AppError(500, 'Failed to check active calls', activeCallError);
+  if (activeCall) throw new AppError(409, 'A call to this lead is already queued or in progress');
+
+  const { data: agentConfig, error: configError } = await supabase
+    .from('agent_configs')
+    .select('retell_phone_number')
+    .eq('organization_id', organizationId)
+    .single();
+
+  if (configError || !agentConfig?.retell_phone_number) {
+    throw new AppError(400, 'Add your Retell phone number in Settings before calling this lead');
+  }
+
+  return scheduleCall(
+    organizationId,
+    lead.campaign_id,
+    leadId,
+    agentConfig.retell_phone_number,
+    lead.phone,
+  );
+}
+
 export async function handleRetellWebhook(rawBody: Buffer, signature: string) {
   const bodyStr = rawBody.toString('utf-8');
 
