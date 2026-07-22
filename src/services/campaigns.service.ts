@@ -6,6 +6,7 @@ import { AppError } from '../types';
 import { ensureAgentConfig } from './agent-config.service';
 import { parsePromptContext, serializePromptContext } from '../lib/prompt-context';
 import type { AssignLeadsInput, CampaignCreateInput, CampaignUpdateInput, SequenceStepsUpsertInput } from '../schemas/campaigns.schema';
+import { normalizePhoneForCalling } from '../lib/phone';
 
 type CampaignChannel = 'email' | 'voice' | 'both';
 
@@ -292,7 +293,7 @@ export async function setCampaignStatus(
     // 'both' campaign the calls can still carry the launch, so only block when
     // neither channel has anything to work with.
     if (readiness.ready === 0) {
-      const callable = voiceEnabled ? await countCallableLeads(orgId, id) : 0;
+      const callable = voiceEnabled ? await countCallableLeads(orgId, id, current.timezone) : 0;
       if (callable === 0) {
         throw new AppError(
           400,
@@ -394,9 +395,11 @@ async function enqueueVoiceCalls(
 
   if (leadsError) throw new AppError(500, 'Failed to fetch campaign leads', leadsError);
 
-  const eligibleLeads = (leads ?? []).filter(
-    lead => lead.phone && !STOP_CALLING_STATUSES.includes(lead.status),
-  );
+  const eligibleLeads = (leads ?? []).flatMap(lead => {
+    if (!lead.phone || STOP_CALLING_STATUSES.includes(lead.status)) return [];
+    const toNumber = normalizePhoneForCalling(lead.phone, campaign.timezone);
+    return toNumber ? [{ ...lead, toNumber }] : [];
+  });
 
   const skipped = (leads?.length ?? 0) - eligibleLeads.length;
   const msPerCall = Math.floor(3_600_000 / (campaign.callCadencePerHour || 5));
@@ -405,7 +408,7 @@ async function enqueueVoiceCalls(
   for (let i = 0; i < eligibleLeads.length; i++) {
     const lead = eligibleLeads[i];
     await enqueueScheduleCall(
-      { leadId: lead.id, campaignId, organizationId: orgId, fromNumber, toNumber: lead.phone! },
+      { leadId: lead.id, campaignId, organizationId: orgId, fromNumber, toNumber: lead.toNumber },
       i * msPerCall,
     );
     queued++;
@@ -438,7 +441,7 @@ async function getEmailLaunchReadiness(orgId: string, campaignId: string) {
 
 // Mirrors the eligibility filter in enqueueVoiceCalls, so a 'both' campaign
 // can tell whether the calling side has anything to launch with.
-async function countCallableLeads(orgId: string, campaignId: string) {
+async function countCallableLeads(orgId: string, campaignId: string, timezone: string) {
   const { data: leads, error } = await supabase
     .from('leads')
     .select('id,phone,status')
@@ -449,7 +452,9 @@ async function countCallableLeads(orgId: string, campaignId: string) {
   if (error) throw new AppError(500, 'Failed to inspect campaign call readiness', error);
 
   return (leads ?? []).filter(
-    lead => lead.phone && !STOP_CALLING_STATUSES.includes(lead.status)
+    lead => lead.phone &&
+      !STOP_CALLING_STATUSES.includes(lead.status) &&
+      Boolean(normalizePhoneForCalling(lead.phone, timezone))
   ).length;
 }
 

@@ -6,6 +6,7 @@ import { enqueueScheduleCall } from '../jobs/schedule-call.job';
 import { posthog } from '../lib/posthog';
 import { AppError } from '../types';
 import { env } from '../config/env';
+import { isE164Phone, normalizePhoneForCalling } from '../lib/phone';
 
 const DEFAULT_VOICE_ID = 'openai-Alloy';
 
@@ -106,6 +107,10 @@ export async function scheduleCall(
   fromNumber: string,
   toNumber: string,
 ) {
+  if (!isE164Phone(fromNumber) || !isE164Phone(toNumber)) {
+    throw new AppError(400, 'Call numbers must use E.164 format, for example +916301658275');
+  }
+
   const { data: agentConfig } = await supabase
     .from('agent_configs')
     .select('retell_agent_id')
@@ -176,7 +181,7 @@ export async function scheduleCall(
 export async function callLeadNow(organizationId: string, leadId: string) {
   const { data: lead, error: leadError } = await supabase
     .from('leads')
-    .select('id,campaign_id,phone,status,campaigns(id,channel,voice_mode)')
+    .select('id,campaign_id,phone,status,campaigns(id,channel,voice_mode,timezone)')
     .eq('organization_id', organizationId)
     .eq('id', leadId)
     .maybeSingle();
@@ -189,12 +194,17 @@ export async function callLeadNow(organizationId: string, leadId: string) {
     throw new AppError(400, `Lead status is ${lead.status}; calls are stopped for this lead`);
   }
 
-  const campaign = lead.campaigns as unknown as { channel?: string; voice_mode?: string } | null;
-  if (campaign?.channel !== 'voice') {
+  const campaign = lead.campaigns as unknown as { channel?: string; voice_mode?: string; timezone?: string } | null;
+  if (campaign?.channel !== 'voice' && campaign?.channel !== 'both') {
     throw new AppError(400, 'Immediate calling is only available for voice campaigns');
   }
   if (campaign.voice_mode !== 'ai') {
     throw new AppError(400, 'Immediate AI calling is only available for AI voice campaigns');
+  }
+
+  const toNumber = normalizePhoneForCalling(lead.phone, campaign.timezone);
+  if (!toNumber) {
+    throw new AppError(400, 'Lead phone number is invalid. Use E.164 format, for example +916301658275');
   }
 
   const { data: activeCall, error: activeCallError } = await supabase
@@ -225,7 +235,7 @@ export async function callLeadNow(organizationId: string, leadId: string) {
     lead.campaign_id,
     leadId,
     agentConfig.retell_phone_number,
-    lead.phone,
+    toNumber,
   );
 }
 
