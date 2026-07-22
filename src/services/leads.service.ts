@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { redis } from '../lib/redis';
 import { AppError } from '../types';
 import { mapRow } from '../lib/csv-parser';
+import { sendEmail } from './email.service';
 import { enqueueInitialEmailStepIfActive } from './campaigns.service';
 import { APOLLO_ENRICHMENT_CAP } from '../config/constants';
 import type { ApolloEnrichInput, ApolloSearchInput, CsvUploadInput, LeadCreateInput } from '../schemas/leads.schema';
@@ -48,6 +49,8 @@ type ApolloPerson = {
   linkedin_url?: string;
   photo_url?: string;
 };
+
+const STOP_SEQUENCE_STATUSES = ['engaged', 'meeting_booked', 'not_interested', 'unsubscribed'];
 
 const LEAD_COLUMNS = [
   'id',
@@ -494,6 +497,120 @@ export async function enrichLead(orgId: string, input: ApolloEnrichInput) {
 
   if (updateError) throw new AppError(500, 'Failed to save enriched lead', updateError);
   return toApiLead(updated as unknown as LeadRow);
+}
+
+export async function sendLeadNow(orgId: string, id: string) {
+  const { data: lead, error: leadError } = await supabase
+    .from('leads')
+    .select(`${LEAD_COLUMNS}, campaigns(id,channel,status)`)
+    .eq('organization_id', orgId)
+    .eq('id', id)
+    .maybeSingle();
+
+  if (leadError) throw new AppError(500, 'Failed to fetch lead for immediate send', leadError);
+  if (!lead) throw new AppError(404, 'Lead not found');
+
+  const row = lead as unknown as LeadRow & { campaigns?: { channel?: string; status?: string } | null };
+  if (!row.email) throw new AppError(400, 'Lead has no email address');
+  if (!row.campaign_id) throw new AppError(400, 'Lead is not attached to a campaign');
+  if (STOP_SEQUENCE_STATUSES.includes(row.status)) {
+    throw new AppError(400, `Lead status is ${row.status}; sequence is stopped for this lead`);
+  }
+  if (row.campaigns?.channel && row.campaigns.channel !== 'email') {
+    throw new AppError(400, 'Immediate send is only available for email campaigns');
+  }
+
+  const { data: alreadySent, error: sentCheckError } = await supabase
+    .from('email_messages')
+    .select('id')
+    .eq('organization_id', orgId)
+    .eq('campaign_id', row.campaign_id)
+    .eq('lead_id', id)
+    .eq('step_number', 1)
+    .eq('status', 'sent')
+    .limit(1)
+    .maybeSingle();
+
+  if (sentCheckError) throw new AppError(500, 'Failed to check existing sent email', sentCheckError);
+  if (alreadySent) throw new AppError(409, 'Step 1 email has already been sent to this lead');
+
+  const { data: reusableMessage, error: reusableError } = await supabase
+    .from('email_messages')
+    .select('id,status')
+    .eq('organization_id', orgId)
+    .eq('campaign_id', row.campaign_id)
+    .eq('lead_id', id)
+    .eq('step_number', 1)
+    .in('status', ['queued', 'failed'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (reusableError) throw new AppError(500, 'Failed to find queued email message', reusableError);
+
+  let emailMessageId = reusableMessage?.id;
+  if (!emailMessageId) {
+    const { data: firstStep, error: stepError } = await supabase
+      .from('email_sequence_steps')
+      .select('id')
+      .eq('campaign_id', row.campaign_id)
+      .eq('step_number', 1)
+      .maybeSingle();
+
+    if (stepError) throw new AppError(500, 'Failed to fetch first campaign email step', stepError);
+
+    const { data: message, error: messageError } = await supabase
+      .from('email_messages')
+      .insert({
+        organization_id: orgId,
+        campaign_id: row.campaign_id,
+        lead_id: id,
+        sequence_step_id: firstStep?.id ?? null,
+        step_number: 1,
+        subject: '',
+        body: '',
+        status: 'queued',
+      })
+      .select('id')
+      .single();
+
+    if (messageError || !message) throw new AppError(500, 'Failed to create email message for immediate send', messageError);
+    emailMessageId = message.id;
+  } else if (reusableMessage?.status === 'failed') {
+    await supabase
+      .from('email_messages')
+      .update({ status: 'queued' })
+      .eq('organization_id', orgId)
+      .eq('id', emailMessageId);
+  }
+
+  await supabase
+    .from('leads')
+    .update({ status: 'queued', updated_at: new Date().toISOString() })
+    .eq('organization_id', orgId)
+    .eq('id', id)
+    .in('status', ['new', 'enrichment_failed']);
+
+  const sendResult = await sendEmail(emailMessageId, orgId);
+  if (!sendResult.success) {
+    throw new AppError(429, sendResult.reason ?? 'Email was not sent', sendResult);
+  }
+
+  const { data: updated, error: updatedError } = await supabase
+    .from('leads')
+    .select(LEAD_COLUMNS)
+    .eq('organization_id', orgId)
+    .eq('id', id)
+    .single();
+
+  if (updatedError) throw new AppError(500, 'Email sent, but failed to reload lead', updatedError);
+
+  return {
+    success: true,
+    emailMessageId,
+    gmailMessageId: sendResult.gmailMessageId,
+    lead: toApiLead(updated as unknown as LeadRow),
+  };
 }
 
 export async function enrichLeads(

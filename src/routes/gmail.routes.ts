@@ -18,7 +18,11 @@ function getOrgId(req: AuthenticatedRequest) {
 router.get('/auth-url', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     const orgId = getOrgId(req);
-    const url = getAuthUrl();
+    const { returnTo, sendLeadId } = req.query as Record<string, string | undefined>;
+    const state = returnTo || sendLeadId
+      ? Buffer.from(JSON.stringify({ returnTo, sendLeadId })).toString('base64url')
+      : undefined;
+    const url = getAuthUrl(state);
     res.json({ url, orgId });
   } catch (err) {
     next(err);

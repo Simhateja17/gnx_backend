@@ -3,6 +3,7 @@ import { enqueueSendEmail } from '../jobs/send-email.job';
 import { enqueueScheduleCall } from '../jobs/schedule-call.job';
 import { posthog } from '../lib/posthog';
 import { AppError } from '../types';
+import { ensureAgentConfig } from './agent-config.service';
 import type { AssignLeadsInput, CampaignCreateInput, CampaignUpdateInput, SequenceStepsUpsertInput } from '../schemas/campaigns.schema';
 
 type CampaignRow = {
@@ -99,14 +100,8 @@ function toApiCampaign(row: CampaignRow, stats?: CampaignStats) {
 }
 
 async function getDefaultAgentConfigId(orgId: string) {
-  const { data, error } = await supabase
-    .from('agent_configs')
-    .select('id')
-    .eq('organization_id', orgId)
-    .maybeSingle();
-
-  if (error) throw new AppError(500, 'Failed to read agent configuration', error);
-  return data?.id ?? null;
+  const config = await ensureAgentConfig(orgId);
+  return config.id;
 }
 
 async function getStatsByCampaign(orgId: string, campaignIds: string[]) {
@@ -461,7 +456,7 @@ async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
   for (const lead of eligibleLeads) {
     const { data: existing, error: existingError } = await supabase
       .from('email_messages')
-      .select('id')
+      .select('id,status')
       .eq('organization_id', orgId)
       .eq('campaign_id', campaignId)
       .eq('lead_id', lead.id)
@@ -470,7 +465,21 @@ async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
 
     if (existingError) throw new AppError(500, 'Failed to check existing campaign email', existingError);
     if (existing) {
-      console.log(`[campaigns] Existing step 1 email found for campaign ${campaignId}, lead ${lead.id}. Skipping duplicate queue.`);
+      if (existing.status === 'queued') {
+        const job = await enqueueSendEmail({
+          emailMessageId: existing.id,
+          organizationId: orgId,
+          campaignId,
+          leadId: lead.id,
+          stepNumber: 1,
+        }, {
+          jobId: `send-email-${existing.id}`,
+        });
+        queued++;
+        console.log(`[campaigns] Re-queued existing send-email job ${job.id} for message ${existing.id}, lead ${lead.id}, campaign ${campaignId}`);
+      } else {
+        console.log(`[campaigns] Existing step 1 email found for campaign ${campaignId}, lead ${lead.id}, status ${existing.status}. Skipping duplicate queue.`);
+      }
       continue;
     }
 
