@@ -1,4 +1,5 @@
 import IORedis from 'ioredis';
+import type { Queue } from 'bullmq';
 import { env } from '../config/env';
 
 export const redis = new IORedis(env.REDIS_URL, {
@@ -40,3 +41,13 @@ export const queueConnection = {
   maxRetriesPerRequest: 3,
   retryStrategy: (times: number) => (times > 3 ? null : Math.min(times * 200, 1000)),
 };
+
+// BullMQ Queues are EventEmitters. If nothing listens for 'error', a Redis
+// connection failure becomes an unhandled 'error' event, which Node treats
+// as fatal and crashes the whole process — taking down the API along with
+// the job producers. Attach a listener that just logs instead.
+export function silenceQueueErrors(queue: Queue, name: string): void {
+  queue.on('error', (err) => {
+    console.warn(`[Queue:${name}] connection error (jobs will be unavailable):`, err.message);
+  });
+}

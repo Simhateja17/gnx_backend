@@ -1,5 +1,5 @@
 import { JobsOptions, Queue } from 'bullmq';
-import { queueConnection } from '../lib/redis';
+import { queueConnection, silenceQueueErrors } from '../lib/redis';
 
 export interface PollInboxJobData {
   organizationId:     string;
@@ -7,6 +7,7 @@ export interface PollInboxJobData {
 }
 
 const pollInboxQueue = new Queue<PollInboxJobData, any, string>('poll-inbox', { connection: queueConnection });
+silenceQueueErrors(pollInboxQueue, 'poll-inbox');
 
 export async function enqueuePollInbox(data: PollInboxJobData, options: JobsOptions = {}) {
   return pollInboxQueue.add('poll-inbox', data, {
