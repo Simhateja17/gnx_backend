@@ -4,7 +4,7 @@ const timeSchema = z
   .string()
   .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use HH:mm format');
 
-export const campaignChannelSchema = z.enum(['email', 'voice']);
+export const campaignChannelSchema = z.enum(['email', 'voice', 'both']);
 
 export const campaignCreateSchema = z.object({
   name: z.string().trim().min(3).max(120),
