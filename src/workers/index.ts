@@ -6,11 +6,13 @@ import { redisConnection } from '../lib/redis';
 import { supabase } from '../lib/supabase';
 import { enqueueRecurringPollInbox } from '../jobs/poll-inbox.job';
 import { enqueueScheduleCall } from '../jobs/schedule-call.job';
+import { enqueueRecurringBillingRenewalCheck } from '../jobs/billing-renewal-check.job';
 import { sendEmail, checkSendCap } from '../services/email.service';
 import { pollInbox } from '../services/gmail.service';
 import { scheduleCall } from '../services/voice.service';
 import { enrichLeads } from '../services/leads.service';
 import { processCsvImportJob } from '../services/leads.service';
+import { runRenewalCheck } from '../services/billing.service';
 import type { SendEmailJobData } from '../jobs/send-email.job';
 import type { PollInboxJobData } from '../jobs/poll-inbox.job';
 import type { ScheduleCallJobData } from '../jobs/schedule-call.job';
@@ -137,6 +139,15 @@ const csvImportWorker = new Worker<CsvImportJobData>('csv-import', async (job) =
   concurrency: 2,
 });
 
+const billingRenewalCheckWorker = new Worker('billing-renewal-check', async (job) => {
+  console.log(`[billing-renewal-check] Processing job ${job.id}`);
+  await runRenewalCheck();
+  console.log(`[billing-renewal-check] Job ${job.id} completed`);
+}, {
+  connection: redisConnection,
+  concurrency: 1,
+});
+
 function reportJobFailure(queue: string, job: { id?: string; attemptsMade?: number } | undefined, err: Error) {
   console.error(`[${queue}] Job ${job?.id} failed:`, err.message);
   Sentry.captureException(err, {
@@ -149,8 +160,24 @@ pollInboxWorker.on('failed', (job, err) => reportJobFailure('poll-inbox', job, e
 scheduleCallWorker.on('failed', (job, err) => reportJobFailure('schedule-call', job, err));
 enrichLeadsWorker.on('failed', (job, err) => reportJobFailure('enrich-leads', job, err));
 csvImportWorker.on('failed', (job, err) => reportJobFailure('csv-import', job, err));
+billingRenewalCheckWorker.on('failed', (job, err) => reportJobFailure('billing-renewal-check', job, err));
 
-console.log('Workers started: send-email, poll-inbox, schedule-call, enrich-leads, csv-import');
+// Workers are EventEmitters too — an unhandled 'error' (e.g. Redis dropping
+// the connection) would otherwise crash the whole workers process.
+function reportConnectionError(queue: string, err: Error) {
+  console.warn(`[${queue}] connection error:`, err.message);
+}
+
+sendEmailWorker.on('error', (err) => reportConnectionError('send-email', err));
+pollInboxWorker.on('error', (err) => reportConnectionError('poll-inbox', err));
+scheduleCallWorker.on('error', (err) => reportConnectionError('schedule-call', err));
+enrichLeadsWorker.on('error', (err) => reportConnectionError('enrich-leads', err));
+csvImportWorker.on('error', (err) => reportConnectionError('csv-import', err));
+billingRenewalCheckWorker.on('error', (err) => reportConnectionError('billing-renewal-check', err));
+
+console.log('Workers started: send-email, poll-inbox, schedule-call, enrich-leads, csv-import, billing-renewal-check');
+
+void enqueueRecurringBillingRenewalCheck();
 
 async function scheduleRecurringInboxPolls() {
   const { data, error } = await supabase
@@ -175,4 +202,4 @@ async function scheduleRecurringInboxPolls() {
 
 void scheduleRecurringInboxPolls();
 
-export { sendEmailWorker, pollInboxWorker, scheduleCallWorker, enrichLeadsWorker, csvImportWorker };
+export { sendEmailWorker, pollInboxWorker, scheduleCallWorker, enrichLeadsWorker, csvImportWorker, billingRenewalCheckWorker };

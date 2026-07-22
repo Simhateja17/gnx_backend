@@ -2,6 +2,7 @@ import { Router, Response, NextFunction } from 'express';
 import multer from 'multer';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
 import { validate } from '../middleware/validate.middleware';
+import { requireActiveSubscription } from '../middleware/billing.middleware';
 import { apolloEnrichSchema, apolloSearchSchema, csvUploadSchema, leadCreateSchema } from '../schemas/leads.schema';
 import { createLead, deleteLead, enrichLead, getCsvImportProgress, listLeads, listLeadsFiltered, searchApollo, uploadCsvLeads } from '../services/leads.service';
 import { parseCsv, mapHeaders } from '../lib/csv-parser';
@@ -58,7 +59,7 @@ router.post('/', validate(leadCreateSchema), async (req: AuthenticatedRequest, r
   }
 });
 
-router.post('/apollo-search', validate(apolloSearchSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+router.post('/apollo-search', requireActiveSubscription, validate(apolloSearchSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     res.json(await searchApollo(getOrgId(req), req.body));
   } catch (err) {
@@ -66,7 +67,7 @@ router.post('/apollo-search', validate(apolloSearchSchema), async (req: Authenti
   }
 });
 
-router.post('/apollo-enrich', validate(apolloEnrichSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+router.post('/apollo-enrich', requireActiveSubscription, validate(apolloEnrichSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     res.json(await enrichLead(getOrgId(req), req.body));
   } catch (err) {
@@ -74,7 +75,7 @@ router.post('/apollo-enrich', validate(apolloEnrichSchema), async (req: Authenti
   }
 });
 
-router.post('/csv-upload', validate(csvUploadSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+router.post('/csv-upload', requireActiveSubscription, validate(csvUploadSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     res.status(201).json(await uploadCsvLeads(getOrgId(req), req.body));
   } catch (err) {
@@ -82,7 +83,7 @@ router.post('/csv-upload', validate(csvUploadSchema), async (req: AuthenticatedR
   }
 });
 
-router.post('/csv-import', upload.single('file'), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+router.post('/csv-import', requireActiveSubscription, upload.single('file'), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     if (!req.file) throw new AppError(400, 'No CSV file uploaded');
 
