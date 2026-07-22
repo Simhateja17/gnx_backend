@@ -5,6 +5,7 @@ import { AppError } from '../types';
 import { withRetry } from '../lib/retry';
 import { ensureAgentConfig } from './agent-config.service';
 import { GenerateEmailInput, GenerateReplyInput, GenerateVoicePromptInput } from '../schemas/ai.schema';
+import { formatPromptContextForPrompt } from '../lib/prompt-context';
 import { z } from 'zod';
 
 const AI_TIMEOUT_MS = 30_000;
@@ -131,7 +132,7 @@ PRODUCT: ${agentConfig.product_description}
 VALUE PROPOSITION: ${agentConfig.value_proposition}
 ${agentConfig.pain_points ? `BUYER PAIN POINTS TO ADDRESS: ${agentConfig.pain_points}` : ''}
 ${agentConfig.booking_link ? `BOOKING LINK: ${agentConfig.booking_link}` : ''}
-${campaign.prompt_context ? `CAMPAIGN CONTEXT: ${campaign.prompt_context}` : ''}
+${formatPromptContextForPrompt(campaign.prompt_context)}
 
 TONE: ${toneInstruction}`;
 
@@ -370,9 +371,10 @@ export async function generateVoicePrompt(orgId: string, input: GenerateVoicePro
       .eq('organization_id', orgId)
       .single();
     if (!campaignResult.data) throw new AppError(404, 'Campaign not found');
-    if (campaignResult.data.prompt_context) {
-      campaignContext = `- Campaign Context: ${campaignResult.data.prompt_context}`;
-    }
+    campaignContext = formatPromptContextForPrompt(campaignResult.data.prompt_context, {
+      bullet: '- ',
+      labels: 'title',
+    });
   }
 
   const toneInstruction = getToneInstruction(agentConfig.tone);
