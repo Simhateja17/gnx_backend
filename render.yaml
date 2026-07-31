@@ -49,17 +49,21 @@ services:
         sync: false
       - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
+      - key: RAZORPAY_CURRENCY
+        value: USD
+      - key: RAZORPAY_INTERNATIONAL_PAYMENTS_ENABLED
+        sync: false
       - key: RAZORPAY_PLAN_STARTER_MONTHLY_AMOUNT
         sync: false
-      - key: RAZORPAY_PLAN_STARTER_ANNUAL_AMOUNT
+      - key: RAZORPAY_PLAN_STARTER_ANNUAL_TOTAL_AMOUNT
         sync: false
       - key: RAZORPAY_PLAN_GROWTH_MONTHLY_AMOUNT
         sync: false
-      - key: RAZORPAY_PLAN_GROWTH_ANNUAL_AMOUNT
+      - key: RAZORPAY_PLAN_GROWTH_ANNUAL_TOTAL_AMOUNT
         sync: false
       - key: RAZORPAY_PLAN_SCALE_MONTHLY_AMOUNT
         sync: false
-      - key: RAZORPAY_PLAN_SCALE_ANNUAL_AMOUNT
+      - key: RAZORPAY_PLAN_SCALE_ANNUAL_TOTAL_AMOUNT
         sync: false
       - key: BILLING_GRACE_PERIOD_DAYS
         sync: false
@@ -119,17 +123,21 @@ services:
         sync: false
       - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
+      - key: RAZORPAY_CURRENCY
+        value: USD
+      - key: RAZORPAY_INTERNATIONAL_PAYMENTS_ENABLED
+        sync: false
       - key: RAZORPAY_PLAN_STARTER_MONTHLY_AMOUNT
         sync: false
-      - key: RAZORPAY_PLAN_STARTER_ANNUAL_AMOUNT
+      - key: RAZORPAY_PLAN_STARTER_ANNUAL_TOTAL_AMOUNT
         sync: false
       - key: RAZORPAY_PLAN_GROWTH_MONTHLY_AMOUNT
         sync: false
-      - key: RAZORPAY_PLAN_GROWTH_ANNUAL_AMOUNT
+      - key: RAZORPAY_PLAN_GROWTH_ANNUAL_TOTAL_AMOUNT
         sync: false
       - key: RAZORPAY_PLAN_SCALE_MONTHLY_AMOUNT
         sync: false
-      - key: RAZORPAY_PLAN_SCALE_ANNUAL_AMOUNT
+      - key: RAZORPAY_PLAN_SCALE_ANNUAL_TOTAL_AMOUNT
         sync: false
       - key: BILLING_GRACE_PERIOD_DAYS
         sync: false
