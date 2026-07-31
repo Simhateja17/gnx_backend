@@ -39,8 +39,8 @@ jobs:
         env:
           NODE_ENV: test
           PORT: 3000
-          FRONTEND_URL: http://localhost:3000
-          SUPABASE_URL: https://example.supabase.co
+          FRONTEND_URL: https://ci.invalid
+          SUPABASE_URL: https://ci.invalid
           SUPABASE_SERVICE_ROLE_KEY: ci-service-role-key
           SUPABASE_ANON_KEY: ci-anon-key
           JWT_SECRET: ci-jwt-secret
