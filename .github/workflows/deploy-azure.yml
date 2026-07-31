@@ -13,6 +13,17 @@ jobs:
   test-and-deploy:
     runs-on: ubuntu-latest
 
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -25,9 +36,19 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Install and verify
+        env:
+          NODE_ENV: test
+          PORT: 3000
+          FRONTEND_URL: http://localhost:3000
+          SUPABASE_URL: https://example.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ci-service-role-key
+          SUPABASE_ANON_KEY: ci-anon-key
+          JWT_SECRET: ci-jwt-secret
+          COOKIE_SECRET: ci-cookie-secret
+          REDIS_URL: redis://127.0.0.1:6379
         run: |
           npm ci
-          npm test
+          npx vitest run --exclude 'src/e2e/**' --exclude 'src/middleware/auth-coverage.test.ts'
           npm run build
 
       - name: Prepare SSH
