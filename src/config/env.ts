@@ -30,14 +30,20 @@ const envSchema = z.object({
   RAZORPAY_KEY_ID: z.string().trim().default(''),
   RAZORPAY_KEY_SECRET: z.string().trim().default(''),
   RAZORPAY_WEBHOOK_SECRET: z.string().trim().default(''),
+  RAZORPAY_CURRENCY: z.string().trim().regex(/^[A-Z]{3}$/).default('USD'),
+  RAZORPAY_INTERNATIONAL_PAYMENTS_ENABLED: z.preprocess(
+    (value) => typeof value === 'string' ? value.toLowerCase() === 'true' : value,
+    z.boolean().default(false),
+  ),
 
-  // Plan prices in the smallest USD unit (cents). Matches frontend/app/(app)/billing/page.jsx's PLAN_CONFIG.
+  // Plan prices in the smallest currency unit. Annual amounts are the full
+  // amount charged for the annual billing period, not the monthly display price.
   RAZORPAY_PLAN_STARTER_MONTHLY_AMOUNT: z.coerce.number().default(5900),
-  RAZORPAY_PLAN_STARTER_ANNUAL_AMOUNT: z.coerce.number().default(4900),
+  RAZORPAY_PLAN_STARTER_ANNUAL_TOTAL_AMOUNT: z.coerce.number().default(58800),
   RAZORPAY_PLAN_GROWTH_MONTHLY_AMOUNT: z.coerce.number().default(17900),
-  RAZORPAY_PLAN_GROWTH_ANNUAL_AMOUNT: z.coerce.number().default(14900),
+  RAZORPAY_PLAN_GROWTH_ANNUAL_TOTAL_AMOUNT: z.coerce.number().default(178800),
   RAZORPAY_PLAN_SCALE_MONTHLY_AMOUNT: z.coerce.number().default(47900),
-  RAZORPAY_PLAN_SCALE_ANNUAL_AMOUNT: z.coerce.number().default(39900),
+  RAZORPAY_PLAN_SCALE_ANNUAL_TOTAL_AMOUNT: z.coerce.number().default(478800),
 
   BILLING_GRACE_PERIOD_DAYS: z.coerce.number().default(7),
 

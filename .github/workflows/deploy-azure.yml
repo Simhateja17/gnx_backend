@@ -1,0 +1,90 @@
+name: Deploy backend to Azure VM
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: azure-backend-production
+  cancel-in-progress: true
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install and verify
+        env:
+          NODE_ENV: test
+          PORT: 3000
+          FRONTEND_URL: https://ci.invalid
+          SUPABASE_URL: https://ci.invalid
+          SUPABASE_SERVICE_ROLE_KEY: ci-service-role-key
+          SUPABASE_ANON_KEY: ci-anon-key
+          JWT_SECRET: ci-jwt-secret
+          COOKIE_SECRET: ci-cookie-secret
+          REDIS_URL: redis://127.0.0.1:6379
+        run: |
+          npm ci
+          npx vitest run --exclude 'src/e2e/**' --exclude 'src/middleware/auth-coverage.test.ts'
+          npm run build
+
+      - name: Prepare SSH
+        env:
+          AZURE_SSH_KEY: ${{ secrets.AZURE_SSH_KEY }}
+          AZURE_HOST: ${{ secrets.AZURE_HOST }}
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$AZURE_SSH_KEY" > "$HOME/.ssh/azure_deploy_key"
+          chmod 600 "$HOME/.ssh/azure_deploy_key"
+          ssh-keyscan -H "$AZURE_HOST" >> "$HOME/.ssh/known_hosts"
+
+      - name: Upload backend source
+        env:
+          AZURE_HOST: ${{ secrets.AZURE_HOST }}
+          AZURE_USER: ${{ secrets.AZURE_USER }}
+        run: |
+          rsync -az --exclude '.env' --exclude 'node_modules' --exclude 'dist' --exclude 'logs' \
+            -e "ssh -i $HOME/.ssh/azure_deploy_key -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
+            ./ "$AZURE_USER@$AZURE_HOST:~/globonexo-backend/"
+
+      - name: Build and restart PM2 processes
+        env:
+          AZURE_HOST: ${{ secrets.AZURE_HOST }}
+          AZURE_USER: ${{ secrets.AZURE_USER }}
+        run: |
+          ssh -i "$HOME/.ssh/azure_deploy_key" \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$AZURE_USER@$AZURE_HOST" <<'REMOTE'
+          set -euo pipefail
+          cd "$HOME/globonexo-backend"
+          test -f .env || { echo "Missing production .env on VM" >&2; exit 1; }
+          npm ci
+          npm run build
+          npm prune --omit=dev
+          mkdir -p logs
+          pm2 startOrReload ecosystem.config.js --update-env
+          pm2 save
+          REMOTE

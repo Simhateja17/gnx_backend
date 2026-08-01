@@ -516,8 +516,8 @@ export async function sendLeadNow(orgId: string, id: string) {
   if (STOP_SEQUENCE_STATUSES.includes(row.status)) {
     throw new AppError(400, `Lead status is ${row.status}; sequence is stopped for this lead`);
   }
-  if (row.campaigns?.channel && row.campaigns.channel !== 'email') {
-    throw new AppError(400, 'Immediate send is only available for email campaigns');
+  if (row.campaigns?.channel && !['email', 'both'].includes(row.campaigns.channel)) {
+    throw new AppError(400, 'Immediate send is only available for campaigns that use email');
   }
 
   const { data: alreadySent, error: sentCheckError } = await supabase

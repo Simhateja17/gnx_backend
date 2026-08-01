@@ -114,9 +114,17 @@ All authenticated endpoints require the HTTP-only session cookie set by `/api/au
 
 | Method | Route | Description | Owner |
 |--------|-------|-------------|-------|
-| POST | `/billing/checkout` | Create Stripe Checkout session | Manasa |
-| POST | `/billing/portal` | Create Stripe Customer Portal session | Manasa |
-| POST | `/webhooks/stripe` | Stripe webhooks | Manasa |
+| POST | `/billing/checkout` | Create a Razorpay Order for a manually renewed monthly or annual plan | Manasa |
+| POST | `/billing/checkout/verify` | Verify and finalize a captured Razorpay payment | Manasa |
+| GET | `/billing/history` | List organization billing charges | Manasa |
+| POST | `/webhooks/razorpay` | Razorpay payment webhooks | Manasa |
+
+Billing deployment prerequisites:
+
+- Enable Razorpay International Payments on the merchant account before setting `RAZORPAY_INTERNATIONAL_PAYMENTS_ENABLED=true`.
+- Configure the Razorpay webhook URL as `/webhooks/razorpay` with the same `RAZORPAY_WEBHOOK_SECRET` used by the backend.
+- Run the Razorpay billing migrations before enabling checkout, including `20260731000000_harden_razorpay_billing.sql`.
+- Annual amount environment variables are full annual totals in the currency's smallest unit.
 
 ---
 
