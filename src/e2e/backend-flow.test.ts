@@ -5,6 +5,7 @@ import { Queue } from 'bullmq';
 import { app } from '../app';
 import { getTestUserCookies } from '../test/auth-helpers';
 import { queueConnection } from '../lib/redis';
+import { supabase } from '../lib/supabase';
 
 // End-to-end backend walk of the core PRD flows (5.1-5.3), run against the
 // real dev Supabase project using the dedicated test account. Deliberately
@@ -163,6 +164,13 @@ describe('E2E: dashboard, analytics, and settings reflect real org state', () =>
 
 describe('E2E: support ticket flow', () => {
   let ticketId: string;
+
+  afterAll(async () => {
+    // No DELETE /api/support/tickets/:id endpoint exists (by design — admins
+    // resolve/close tickets, they don't delete them), so this goes straight
+    // to the DB. Cascades to the ticket's messages via the FK's ON DELETE CASCADE.
+    if (ticketId) await supabase.from('support_tickets').delete().eq('id', ticketId);
+  });
 
   it('creates a support ticket', async () => {
     const res = await request(app).post('/api/support/tickets').set('Cookie', cookies).send({

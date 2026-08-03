@@ -13,6 +13,19 @@ function getOrgId(req: AuthenticatedRequest) {
   return orgId;
 }
 
+// Hands the caller's own already-valid Supabase access token to the browser so
+// it can authenticate its direct Realtime websocket connection (a separate
+// session from Express's service-role DB access, which the org-scoped RLS
+// policies otherwise have no way to recognize).
+router.get('/realtime-token', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    if (!req.accessToken) throw new AppError(400, 'No realtime-capable session available');
+    res.json({ token: req.accessToken });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/tickets', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     res.json(await supportService.listTickets(getOrgId(req)));
