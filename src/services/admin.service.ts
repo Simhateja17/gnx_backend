@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { supabase } from '../lib/supabase';
 import { env } from '../config/env';
 import { AppError } from '../types';
+import { getSubscriptionForOrganization, providerStatusToOrganizationStatus } from './billing.service';
 
 function countBy<T extends Record<string, any>>(rows: T[], key: keyof T) {
   return rows.reduce<Record<string, number>>((acc, row) => {
@@ -173,6 +174,30 @@ export async function suspendOrganization(id: string) {
     .maybeSingle();
 
   if (error) throw new AppError(500, 'Failed to suspend organization', error);
+  if (!data) throw new AppError(404, 'Organization not found');
+
+  return {
+    id: data.id,
+    name: data.name,
+    subscriptionStatus: data.subscription_status,
+    updatedAt: data.updated_at,
+  };
+}
+
+export async function unsuspendOrganization(id: string) {
+  const subscription = await getSubscriptionForOrganization(id);
+  const restoredStatus = subscription
+    ? providerStatusToOrganizationStatus(subscription.status)
+    : 'payment_required';
+
+  const { data, error } = await supabase
+    .from('organizations')
+    .update({ subscription_status: restoredStatus, updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .select('id,name,subscription_status,updated_at')
+    .maybeSingle();
+
+  if (error) throw new AppError(500, 'Failed to unsuspend organization', error);
   if (!data) throw new AppError(404, 'Organization not found');
 
   return {
