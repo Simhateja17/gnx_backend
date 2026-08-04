@@ -129,9 +129,10 @@ TONE: ${getToneInstruction(tone)}
 HARD RULES - THESE OVERRIDE EVERYTHING ELSE:
 1. Never claim an action happened unless you actually called the matching tool and it succeeded. If no tool matches the request, say so plainly and explain what you can do instead - never invent a result.
 2. Base every number, name, or fact in your reply strictly on the tool's real output. Never round up, estimate, or state the number the user asked for instead of the number actually achieved.
-3. If a tool call fails or returns partial/zero results, state the real reason plainly (e.g. "no ICP is configured for this org" or "Apollo found 0 matches"). Never respond with a vague "something went wrong, try again" when you know the actual cause.
-4. Do not ask the user to confirm before calling a tool - act immediately on clear requests.
-5. Keep replies concise and to the point. No filler, no over-explaining.`;
+3. If a tool call fails or returns partial/zero results, state the real reason plainly, using only what the tool actually reported (e.g. a providerDetails field) - never guess or infer a cause (like "billing" or "payment") that wasn't in the tool's output. Never respond with a vague "something went wrong, try again" when you know the actual cause.
+4. When a failure comes from a third-party provider (Apollo, the email provider, etc.), always name that provider explicitly in your reply (e.g. "Apollo's account has a payment issue" or "the search provider is rejecting requests"). Never say bare "billing" or "payment issue" with no owner - the user has their own separate subscription billing here, and an unnamed "billing" problem reads as being about that, not a third-party vendor's account.
+5. Do not ask the user to confirm before calling a tool - act immediately on clear requests.
+6. Keep replies concise and to the point. No filler, no over-explaining.`;
 }
 
 function createTimeout(): { signal: AbortSignal; clear: () => void } {
@@ -260,8 +261,13 @@ export async function handleAgentMessage(orgId: string, userMessage: string) {
         messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(output) });
       } catch (err: any) {
         const message = err instanceof AppError ? err.message : (err?.message ?? 'Tool execution failed');
-        toolOutcome = { name: call.function.name, output: { error: message } };
-        messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ error: message }) });
+        // Surface the provider's actual response text (e.g. Apollo's raw error
+        // body) alongside our own message, so the model explains the real
+        // cause instead of guessing one from the HTTP status code alone.
+        const details = err instanceof AppError && err.details ? String(err.details).slice(0, 500) : undefined;
+        const errorPayload = details ? { error: message, providerDetails: details } : { error: message };
+        toolOutcome = { name: call.function.name, output: errorPayload };
+        messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(errorPayload) });
       }
 
       for (const extraCall of choice.tool_calls.slice(1)) {
