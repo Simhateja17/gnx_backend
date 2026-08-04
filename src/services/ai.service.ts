@@ -32,7 +32,7 @@ const TONE_DESCRIPTIONS: Record<string, string> = {
     'Lead with a provocative insight or industry trend that challenges the prospect\'s current approach. Be bold and confident, backed by data or logic.',
 };
 
-function getToneInstruction(tone: string): string {
+export function getToneInstruction(tone: string): string {
   return TONE_DESCRIPTIONS[tone] || TONE_DESCRIPTIONS.consultative;
 }
 
@@ -54,7 +54,7 @@ function getHookInstruction(hookStyle: string | null | undefined): string | null
   return HOOK_STYLE_DESCRIPTIONS[hookStyle] || null;
 }
 
-function sanitizeText(text: string): string {
+export function sanitizeText(text: string): string {
   return text
     .replace(/—/g, '-')
     .replace(/–/g, '-')

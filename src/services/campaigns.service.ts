@@ -569,6 +569,28 @@ async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
   return queued;
 }
 
+// Powers the AI agent's "pause weekend sending" tool - pauses every active
+// campaign that sends email (email or both), reusing the existing
+// setCampaignStatus so pausing goes through the same validation/side effects
+// as pausing from the Campaigns page.
+export async function pauseAllActiveEmailCampaigns(orgId: string) {
+  const { data, error } = await supabase
+    .from('campaigns')
+    .select('id, name, channel')
+    .eq('organization_id', orgId)
+    .eq('status', 'active')
+    .in('channel', ['email', 'both']);
+
+  if (error) throw new AppError(500, 'Failed to fetch active campaigns', error);
+
+  const active = data ?? [];
+  if (active.length === 0) return { paused: 0, names: [] as string[] };
+
+  await Promise.all(active.map(c => setCampaignStatus(orgId, c.id, 'paused')));
+
+  return { paused: active.length, names: active.map(c => c.name) };
+}
+
 export async function deleteCampaign(orgId: string, id: string) {
   const { data, error } = await supabase
     .from('campaigns')
