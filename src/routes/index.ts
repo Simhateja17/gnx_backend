@@ -17,6 +17,7 @@ import adminRoutes from './admin.routes';
 import supportRoutes from './support.routes';
 import systemRoutes from './system.routes';
 import meetingsRoutes from './meetings.routes';
+import agentRoutes from './agent.routes';
 
 const router = Router();
 
@@ -38,5 +39,6 @@ router.use('/admin', adminRoutes);
 router.use('/support', supportRoutes);
 router.use('/system', systemRoutes);
 router.use('/meetings', meetingsRoutes);
+router.use('/agent', agentRoutes);
 
 export default router;
