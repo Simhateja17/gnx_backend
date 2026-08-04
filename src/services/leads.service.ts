@@ -4,8 +4,9 @@ import { AppError } from '../types';
 import { mapRow } from '../lib/csv-parser';
 import { sendEmail } from './email.service';
 import { enqueueInitialEmailStepIfActive } from './campaigns.service';
-import { APOLLO_ENRICHMENT_CAP } from '../config/constants';
+import { APOLLO_ENRICHMENT_CAP, AGENT_ICP_SEARCH_MAX_LEADS, AGENT_ICP_SEARCH_MAX_ATTEMPTS } from '../config/constants';
 import { matchApolloPerson, searchApolloPeople } from '../lib/apollo';
+import { ensureAgentConfig } from './agent-config.service';
 import {
   apolloWebhookExpected,
   buildApolloPersonMatchRequest,
@@ -365,6 +366,101 @@ export async function searchApollo(orgId: string, input: ApolloSearchInput) {
     );
     throw error;
   }
+}
+
+export type IcpSearchCriteria = {
+  count?: number;
+  titles?: string[];
+  locations?: string[];
+  companySizes?: string[];
+  keywords?: string;
+  campaignId?: string;
+};
+
+// Powers the AI agent's "get me N ICP leads" tool. Apollo search is
+// paginated and every page can include leads we already have, so a single
+// call rarely nets exactly `count` new leads. This repeatedly calls the
+// existing searchApollo() against successive pages, accumulating net-new
+// saves, until it hits the requested count, runs out of matches, or hits
+// the attempt cap (AGENT_ICP_SEARCH_MAX_ATTEMPTS) - whichever comes first -
+// so a narrow ICP can't cause runaway Apollo spend.
+export async function searchApolloForIcp(orgId: string, criteria: IcpSearchCriteria) {
+  const requested = Math.min(criteria.count ?? 50, AGENT_ICP_SEARCH_MAX_LEADS);
+
+  let titles = criteria.titles ?? [];
+  let locations = criteria.locations ?? [];
+  let companySizes = criteria.companySizes ?? [];
+
+  if (titles.length === 0 && locations.length === 0 && companySizes.length === 0) {
+    const agentConfig = await ensureAgentConfig(orgId);
+    titles = agentConfig.icp_titles ?? [];
+    locations = agentConfig.icp_geos ?? [];
+    companySizes = agentConfig.icp_company_sizes ?? [];
+  }
+
+  if (titles.length === 0 && locations.length === 0 && companySizes.length === 0) {
+    throw new AppError(
+      400,
+      'No ICP criteria available: this organization has no saved ICP (titles/company size/location) and none were specified in the request. Set up your ICP in Settings, or specify criteria directly.',
+    );
+  }
+
+  let totalInserted = 0;
+  let totalSkipped = 0;
+  let attemptsUsed = 0;
+  let exhausted = false;
+  const savedLeads: Awaited<ReturnType<typeof saveApolloPeople>>['saved'] = [];
+
+  for (let page = 1; attemptsUsed < AGENT_ICP_SEARCH_MAX_ATTEMPTS && totalInserted < requested; page++) {
+    attemptsUsed++;
+
+    const result = await searchApollo(orgId, {
+      campaignId: criteria.campaignId,
+      titles,
+      locations,
+      companySizes,
+      keywords: criteria.keywords ?? '',
+      page,
+      perPage: Math.min(requested - totalInserted + 20, 100),
+    });
+
+    totalInserted += result.inserted;
+    totalSkipped += result.skipped;
+    if (Array.isArray((result.items as any))) {
+      savedLeads.push(...(result.items as any));
+    }
+
+    const pageReturnedNothing = (result.inserted + result.skipped) === 0;
+    if (pageReturnedNothing) {
+      exhausted = true;
+      break;
+    }
+  }
+
+  return {
+    requested,
+    inserted: totalInserted,
+    skippedDuplicates: totalSkipped,
+    attemptsUsed,
+    exhausted,
+    items: savedLeads.slice(0, requested),
+  };
+}
+
+// Powers the AI agent's "summarize hottest leads" tool - same scoring/sort
+// logic the frontend previously duplicated client-side in respondSummarizeHotLeads.
+export async function getHotLeadsSummary(orgId: string, limit = 5) {
+  const { data, error } = await supabase
+    .from('leads')
+    .select(LEAD_COLUMNS)
+    .eq('organization_id', orgId)
+    .gt('score', 0)
+    .order('score', { ascending: false })
+    .limit(limit);
+
+  if (error) throw new AppError(500, 'Failed to fetch hot leads', error);
+
+  return { items: ((data ?? []) as unknown as LeadRow[]).map(toApiLead) };
 }
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
