@@ -12,8 +12,9 @@ ALTER TABLE subscriptions
     CHECK (billing_period IN ('monthly', 'annual')),
   ADD COLUMN IF NOT EXISTS grace_ends_at TIMESTAMPTZ;
 
--- subscriptions.status / organizations.subscription_status vocabulary from
--- here on: 'trialing' | 'active' | 'past_due' | 'restricted' | 'canceled'.
+-- Legacy status vocabulary retained for migration compatibility. New
+-- subscriptions use provider statuses plus organization entitlement states:
+-- 'payment_required' | 'active' | 'past_due' | 'restricted'.
 -- ('past_due' = grace period, full access; 'restricted' = grace expired.)
 
 -- One row per Razorpay Order/Payment attempt — one-time charges have no

@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
+import { requireActiveSubscription } from '../middleware/billing.middleware';
 import { validate } from '../middleware/validate.middleware';
 import { updateSettingsSchema } from '../schemas/settings.schema';
 import * as settingsService from '../services/settings.service';
 
 const router = Router();
 
-router.get('/', authenticate, async (req: AuthenticatedRequest, res, next) => {
+router.get('/', authenticate, requireActiveSubscription, async (req: AuthenticatedRequest, res, next) => {
   try {
     res.json(await settingsService.getSettings(req.user.id, req.organization.id));
   } catch (err) {
@@ -14,7 +15,7 @@ router.get('/', authenticate, async (req: AuthenticatedRequest, res, next) => {
   }
 });
 
-router.put('/', authenticate, validate(updateSettingsSchema), async (req: AuthenticatedRequest, res, next) => {
+router.put('/', authenticate, requireActiveSubscription, validate(updateSettingsSchema), async (req: AuthenticatedRequest, res, next) => {
   try {
     res.json(await settingsService.updateSettings(req.user.id, req.organization.id, req.body));
   } catch (err) {

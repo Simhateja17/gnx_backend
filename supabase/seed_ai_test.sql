@@ -21,7 +21,7 @@ VALUES (
   'manasa@acmesaas.com',
   'Manasa',
   'Test',
-  'owner'
+  'member'
 ) ON CONFLICT (id) DO NOTHING;
 
 -- 3. Agent config (populated by onboarding in production)
@@ -60,7 +60,7 @@ INSERT INTO email_sequence_steps (id, campaign_id, step_number, delay_days, body
 VALUES
   ('44440001-0001-0001-0001-000000000001', '44444444-4444-4444-4444-444444444444', 1, 0, NULL),
   ('44440001-0001-0001-0001-000000000002', '44444444-4444-4444-4444-444444444444', 2, 3, 'Mention our recent case study with TechCorp who went from 5 to 18 meetings per month. Focus on the ROI angle.'),
-  ('44440001-0001-0001-0001-000000000003', '44444444-4444-4444-4444-444444444444', 3, 7, 'Offer a free 14-day trial as a final incentive before closing the loop.')
+  ('44440001-0001-0001-0001-000000000003', '44444444-4444-4444-4444-444444444444', 3, 7, 'Offer a concise implementation conversation as a final incentive before closing the loop.')
 ON CONFLICT (id) DO NOTHING;
 
 -- 5. Test voice campaign

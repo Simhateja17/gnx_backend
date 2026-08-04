@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { app } from '../app';
+import { supabase } from '../lib/supabase';
 
 const TEST_USER = {
   email: process.env.TEST_USER_EMAIL ?? '',
@@ -23,13 +24,26 @@ export async function getTestUserCookies(): Promise<string[]> {
     password: TEST_USER.password,
   });
 
+  let cookies: string[];
   if (signupRes.status === 200 || signupRes.status === 201) {
-    return signupRes.headers['set-cookie'] as unknown as string[];
+    cookies = signupRes.headers['set-cookie'] as unknown as string[];
+  } else {
+    const loginRes = await request(app).post('/api/auth/login').send(TEST_USER);
+    if (loginRes.status !== 200) {
+      throw new Error(`Failed to sign up or log in test user: signup=${signupRes.status} login=${loginRes.status} ${loginRes.text}`);
+    }
+    cookies = loginRes.headers['set-cookie'] as unknown as string[];
   }
 
-  const loginRes = await request(app).post('/api/auth/login').send(TEST_USER);
-  if (loginRes.status !== 200) {
-    throw new Error(`Failed to sign up or log in test user: signup=${signupRes.status} login=${loginRes.status} ${loginRes.text}`);
+  // This helper represents a provisioned paid test tenant. It keeps the
+  // product-flow tests meaningful while production customers still start in
+  // payment_required and cannot bypass Billing.
+  const me = await request(app).get('/api/auth/me').set('Cookie', cookies);
+  if (me.status === 200 && me.body.organization?.id) {
+    await supabase
+      .from('organizations')
+      .update({ subscription_status: 'active' })
+      .eq('id', me.body.organization.id);
   }
-  return loginRes.headers['set-cookie'] as unknown as string[];
+  return cookies;
 }

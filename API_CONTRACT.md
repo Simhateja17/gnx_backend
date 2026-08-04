@@ -1,6 +1,6 @@
 # Globonexo Sales AI — Express API Contract
 
-Base URL: `https://api.globonexo.com/api`
+Base URL: `https://api.gnxsales.com/api`
 
 All authenticated endpoints require the HTTP-only session cookie set by `/api/auth/login`.
 
@@ -114,17 +114,22 @@ All authenticated endpoints require the HTTP-only session cookie set by `/api/au
 
 | Method | Route | Description | Owner |
 |--------|-------|-------------|-------|
-| POST | `/billing/checkout` | Create a Razorpay Order for a manually renewed monthly or annual plan | Manasa |
-| POST | `/billing/checkout/verify` | Verify and finalize a captured Razorpay payment | Manasa |
+| POST | `/billing/checkout` | Create a Razorpay recurring Subscription for a monthly or annual plan | Manasa |
+| POST | `/billing/checkout/verify` | Verify the Razorpay subscription authorisation signature and activate the plan | Manasa |
+| PATCH | `/billing/subscription` | Change plan immediately for upgrades or at cycle end for downgrades | Manasa |
+| POST | `/billing/cancel` | Cancel future renewals at the end of the current paid period | Manasa |
 | GET | `/billing/history` | List organization billing charges | Manasa |
-| POST | `/webhooks/razorpay` | Razorpay payment webhooks | Manasa |
+| POST | `/webhooks/razorpay` | Razorpay subscription lifecycle webhooks | Manasa |
 
 Billing deployment prerequisites:
 
 - Enable Razorpay International Payments on the merchant account before setting `RAZORPAY_INTERNATIONAL_PAYMENTS_ENABLED=true`.
-- Configure the Razorpay webhook URL as `/webhooks/razorpay` with the same `RAZORPAY_WEBHOOK_SECRET` used by the backend.
-- Run the Razorpay billing migrations before enabling checkout, including `20260731000000_harden_razorpay_billing.sql`.
+- Configure the Razorpay webhook URL as `https://api.gnxsales.com/webhooks/razorpay` with the same `RAZORPAY_WEBHOOK_SECRET` used by the backend.
+- Select `subscription.authenticated`, `subscription.activated`, `subscription.charged`, `subscription.updated`, `subscription.pending`, `subscription.halted`, `subscription.cancelled`, and `subscription.completed`. Paused/resumed events are intentionally not enabled.
+- Create six Razorpay test Plans and set their IDs in the six `RAZORPAY_SUBSCRIPTION_PLAN_*_ID` environment variables before enabling checkout.
+- Run the Razorpay billing migrations before enabling checkout, including `20260804000000_razorpay_recurring_subscriptions.sql`.
 - Annual amount environment variables are full annual totals in the currency's smallest unit.
+- Monthly subscriptions use 120 cycles and annual subscriptions use 10 cycles. Currency is USD when international payments are enabled.
 
 ---
 

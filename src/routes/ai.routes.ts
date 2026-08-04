@@ -1,5 +1,6 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
+import { requireActiveSubscription } from '../middleware/billing.middleware';
 import { validate } from '../middleware/validate.middleware';
 import { generateEmailSchema, generateReplySchema, generateVoicePromptSchema } from '../schemas/ai.schema';
 import * as aiService from '../services/ai.service';
@@ -7,6 +8,7 @@ import * as aiService from '../services/ai.service';
 const router = Router();
 
 router.use(authenticate);
+router.use(requireActiveSubscription);
 
 router.post(
   '/generate-email',

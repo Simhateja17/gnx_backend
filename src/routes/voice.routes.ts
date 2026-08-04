@@ -1,10 +1,12 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
+import { requireActiveSubscription } from '../middleware/billing.middleware';
 import * as voiceService from '../services/voice.service';
 
 const router = Router();
 
 router.use(authenticate);
+router.use(requireActiveSubscription);
 
 router.post(
   '/agents',

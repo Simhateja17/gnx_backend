@@ -1,5 +1,6 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
+import { requireActiveSubscription } from '../middleware/billing.middleware';
 import { supabase } from '../lib/supabase';
 import { enqueueRecurringPollInbox, removeRecurringPollInbox } from '../jobs/poll-inbox.job';
 import { getAuthUrl, exchangeCode, createOAuth2Client } from '../lib/gmail';
@@ -8,6 +9,7 @@ import { AppError } from '../types';
 
 const router = Router();
 router.use(authenticate);
+router.use(requireActiveSubscription);
 
 function getOrgId(req: AuthenticatedRequest) {
   const orgId = req.organization?.id;

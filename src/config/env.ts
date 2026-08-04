@@ -45,6 +45,16 @@ const envSchema = z.object({
   RAZORPAY_PLAN_SCALE_MONTHLY_AMOUNT: z.coerce.number().default(47900),
   RAZORPAY_PLAN_SCALE_ANNUAL_TOTAL_AMOUNT: z.coerce.number().default(478800),
 
+  // Razorpay Plan IDs are account-owned values. Keep them explicit rather
+  // than deriving them from amounts so a plan can never be silently changed
+  // by a pricing-only deployment.
+  RAZORPAY_SUBSCRIPTION_PLAN_STARTER_MONTHLY_ID: z.string().trim().default(''),
+  RAZORPAY_SUBSCRIPTION_PLAN_STARTER_ANNUAL_ID: z.string().trim().default(''),
+  RAZORPAY_SUBSCRIPTION_PLAN_GROWTH_MONTHLY_ID: z.string().trim().default(''),
+  RAZORPAY_SUBSCRIPTION_PLAN_GROWTH_ANNUAL_ID: z.string().trim().default(''),
+  RAZORPAY_SUBSCRIPTION_PLAN_SCALE_MONTHLY_ID: z.string().trim().default(''),
+  RAZORPAY_SUBSCRIPTION_PLAN_SCALE_ANNUAL_ID: z.string().trim().default(''),
+
   BILLING_GRACE_PERIOD_DAYS: z.coerce.number().default(7),
 
   RESEND_API_KEY: z.string().trim().default(''),

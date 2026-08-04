@@ -12,6 +12,7 @@ import { AppError } from '../types';
 
 const router = Router();
 router.use(authenticate);
+router.use(requireActiveSubscription);
 
 function getOrgId(req: AuthenticatedRequest) {
   const orgId = req.organization?.id;

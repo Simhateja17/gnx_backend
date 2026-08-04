@@ -8,6 +8,39 @@ type SignupInput = z.infer<typeof signupSchema>;
 type LoginInput = z.infer<typeof loginSchema>;
 type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 
+/**
+ * Customer accounts have one role: member. The billing manager is an
+ * organization-level responsibility, not an elevated customer role. Admins
+ * are the only separate application role.
+ */
+export async function normalizeCustomerUser(orgUser: any) {
+  if (!orgUser || orgUser.role === 'admin') return orgUser;
+
+  let normalized = orgUser;
+  if (orgUser.role !== 'member') {
+    const { data: updatedUser } = await supabase
+      .from('users')
+      .update({ role: 'member' })
+      .eq('id', orgUser.id)
+      .select()
+      .single();
+    normalized = updatedUser ? { ...orgUser, ...updatedUser, role: 'member' } : { ...orgUser, role: 'member' };
+  }
+
+  if (!normalized.organizations?.billing_manager_user_id) {
+    const { data: updatedOrganization } = await supabase
+      .from('organizations')
+      .update({ billing_manager_user_id: normalized.id })
+      .eq('id', normalized.organization_id)
+      .is('billing_manager_user_id', null)
+      .select()
+      .single();
+    if (updatedOrganization) normalized = { ...normalized, organizations: updatedOrganization };
+  }
+
+  return normalized;
+}
+
 export async function signup(input: SignupInput) {
   const { data: createData, error: createError } = await supabase.auth.admin.createUser({
     email: input.email,
@@ -45,7 +78,7 @@ export async function signup(input: SignupInput) {
       email: input.email,
       first_name: input.firstName,
       last_name: input.lastName,
-      role: 'owner',
+      role: 'member',
     })
     .select()
     .single();
@@ -54,6 +87,18 @@ export async function signup(input: SignupInput) {
     await supabase.from('organizations').delete().eq('id', organization.id);
     await supabase.auth.admin.deleteUser(authUser.id);
     throw new AppError(500, 'Failed to create user record');
+  }
+
+  const { data: managedOrganization, error: managerError } = await supabase
+    .from('organizations')
+    .update({ billing_manager_user_id: user.id })
+    .eq('id', organization.id)
+    .select()
+    .single();
+  if (managerError || !managedOrganization) {
+    await supabase.from('organizations').delete().eq('id', organization.id);
+    await supabase.auth.admin.deleteUser(authUser.id);
+    throw new AppError(500, 'Failed to configure billing ownership');
   }
 
   const { data: signInData, error: signInError } = await supabaseAuth.auth.signInWithPassword({
@@ -65,7 +110,7 @@ export async function signup(input: SignupInput) {
     throw new AppError(500, 'Account created but sign-in failed');
   }
 
-  return { session: signInData.session, user, organization };
+  return { session: signInData.session, user, organization: managedOrganization };
 }
 
 export async function login(input: LoginInput) {
@@ -88,7 +133,9 @@ export async function login(input: LoginInput) {
     throw new AppError(401, 'User not found');
   }
 
-  return { session: signInData.session, user: orgUser, organization: orgUser.organizations };
+  const normalizedUser = await normalizeCustomerUser(orgUser);
+
+  return { session: signInData.session, user: normalizedUser, organization: normalizedUser.organizations };
 }
 
 export async function logout(accessToken?: string) {
@@ -133,7 +180,8 @@ export async function googleCallback(accessToken: string, refreshToken: string, 
   const session = { access_token: accessToken, refresh_token: refreshToken, expires_in: expiresIn };
 
   if (existingUser) {
-    return { session, user: existingUser, organization: existingUser.organizations };
+    const normalizedUser = await normalizeCustomerUser(existingUser);
+    return { session, user: normalizedUser, organization: normalizedUser.organizations };
   }
 
   // New Google user — derive org name from email domain
@@ -159,7 +207,7 @@ export async function googleCallback(accessToken: string, refreshToken: string, 
       email,
       first_name: firstName,
       last_name: lastName,
-      role: 'owner',
+      role: 'member',
     })
     .select()
     .single();
@@ -169,7 +217,18 @@ export async function googleCallback(accessToken: string, refreshToken: string, 
     throw new AppError(500, 'Failed to create user record');
   }
 
-  return { session, user, organization };
+  const { data: managedOrganization, error: managerError } = await supabase
+    .from('organizations')
+    .update({ billing_manager_user_id: user.id })
+    .eq('id', organization.id)
+    .select()
+    .single();
+  if (managerError || !managedOrganization) {
+    await supabase.from('organizations').delete().eq('id', organization.id);
+    throw new AppError(500, 'Failed to configure billing ownership');
+  }
+
+  return { session, user, organization: managedOrganization };
 }
 
 export async function refreshSession(refreshToken: string) {
