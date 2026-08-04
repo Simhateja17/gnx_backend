@@ -1,12 +1,13 @@
 import { z } from 'zod';
 import { supabase, supabaseAuth } from '../lib/supabase';
-import { env } from '../config/env';
+import { redis } from '../lib/redis';
 import { AppError } from '../types';
-import { signupSchema, loginSchema, resetPasswordSchema } from '../schemas/auth.schema';
+import { signupStartSchema, signupVerifySchema, loginStartSchema, loginVerifySchema } from '../schemas/auth.schema';
 
-type SignupInput = z.infer<typeof signupSchema>;
-type LoginInput = z.infer<typeof loginSchema>;
-type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
+type SignupStartInput = z.infer<typeof signupStartSchema>;
+type SignupVerifyInput = z.infer<typeof signupVerifySchema>;
+type LoginStartInput = z.infer<typeof loginStartSchema>;
+type LoginVerifyInput = z.infer<typeof loginVerifySchema>;
 
 /**
  * Customer accounts have one role: member. The billing manager is an
@@ -41,32 +42,66 @@ export async function normalizeCustomerUser(orgUser: any) {
   return normalized;
 }
 
-export async function signup(input: SignupInput) {
-  const { data: createData, error: createError } = await supabase.auth.admin.createUser({
-    email: input.email,
-    password: input.password,
-    email_confirm: true,
-  });
+const PENDING_SIGNUP_TTL_SECONDS = 15 * 60; // matches the OTP validity window shown to the user
 
-  if (createError || !createData.user) {
-    const isDuplicate =
-      createError?.status === 422 || /already registered|already exists/i.test(createError?.message ?? '');
-    if (isDuplicate) {
-      throw new AppError(409, 'An account with this email already exists');
-    }
-    throw new AppError(400, createError?.message ?? 'Failed to create user');
+function pendingSignupKey(email: string) {
+  return `signup:pending:${email}`;
+}
+
+export async function signupStart(input: SignupStartInput) {
+  const { data: existing } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', input.email)
+    .maybeSingle();
+
+  if (existing) {
+    throw new AppError(409, 'An account with this email already exists');
   }
 
-  const authUser = createData.user;
+  await redis.set(
+    pendingSignupKey(input.email),
+    JSON.stringify({ firstName: input.firstName, lastName: input.lastName, company: input.company }),
+    'EX',
+    PENDING_SIGNUP_TTL_SECONDS,
+  );
+
+  const { error } = await supabaseAuth.auth.signInWithOtp({
+    email: input.email,
+    options: { shouldCreateUser: true },
+  });
+
+  if (error) {
+    throw new AppError(400, error.message || 'Failed to send verification code');
+  }
+}
+
+export async function signupVerify(input: SignupVerifyInput) {
+  const pendingRaw = await redis.get(pendingSignupKey(input.email));
+  if (!pendingRaw) {
+    throw new AppError(400, 'Your signup session expired. Please start again.');
+  }
+  const pending = JSON.parse(pendingRaw) as { firstName: string; lastName: string; company: string };
+
+  const { data: verifyData, error: verifyError } = await supabaseAuth.auth.verifyOtp({
+    email: input.email,
+    token: input.otp,
+    type: 'email',
+  });
+
+  if (verifyError || !verifyData.session || !verifyData.user) {
+    throw new AppError(401, 'Invalid or expired code');
+  }
+
+  const authUser = verifyData.user;
 
   const { data: organization, error: orgError } = await supabase
     .from('organizations')
-    .insert({ name: input.company })
+    .insert({ name: pending.company })
     .select()
     .single();
 
   if (orgError || !organization) {
-    await supabase.auth.admin.deleteUser(authUser.id);
     throw new AppError(500, 'Failed to create organization');
   }
 
@@ -76,8 +111,8 @@ export async function signup(input: SignupInput) {
       organization_id: organization.id,
       supabase_uid: authUser.id,
       email: input.email,
-      first_name: input.firstName,
-      last_name: input.lastName,
+      first_name: pending.firstName,
+      last_name: pending.lastName,
       role: 'member',
     })
     .select()
@@ -85,7 +120,6 @@ export async function signup(input: SignupInput) {
 
   if (userError || !user) {
     await supabase.from('organizations').delete().eq('id', organization.id);
-    await supabase.auth.admin.deleteUser(authUser.id);
     throw new AppError(500, 'Failed to create user record');
   }
 
@@ -101,32 +135,37 @@ export async function signup(input: SignupInput) {
     throw new AppError(500, 'Failed to configure billing ownership');
   }
 
-  const { data: signInData, error: signInError } = await supabaseAuth.auth.signInWithPassword({
-    email: input.email,
-    password: input.password,
-  });
+  await redis.del(pendingSignupKey(input.email));
 
-  if (signInError || !signInData.session) {
-    throw new AppError(500, 'Account created but sign-in failed');
-  }
-
-  return { session: signInData.session, user, organization: managedOrganization };
+  return { session: verifyData.session, user, organization: managedOrganization };
 }
 
-export async function login(input: LoginInput) {
-  const { data: signInData, error: signInError } = await supabaseAuth.auth.signInWithPassword({
+export async function loginStart(input: LoginStartInput) {
+  const { error } = await supabaseAuth.auth.signInWithOtp({
     email: input.email,
-    password: input.password,
+    options: { shouldCreateUser: false },
   });
 
-  if (signInError || !signInData.session || !signInData.user) {
-    throw new AppError(401, 'Invalid email or password');
+  if (error) {
+    throw new AppError(400, 'We could not send a code to that email');
+  }
+}
+
+export async function loginVerify(input: LoginVerifyInput) {
+  const { data: verifyData, error: verifyError } = await supabaseAuth.auth.verifyOtp({
+    email: input.email,
+    token: input.otp,
+    type: 'email',
+  });
+
+  if (verifyError || !verifyData.session || !verifyData.user) {
+    throw new AppError(401, 'Invalid or expired code');
   }
 
   const { data: orgUser, error: orgUserError } = await supabase
     .from('users')
     .select('*, organizations(*)')
-    .eq('supabase_uid', signInData.user.id)
+    .eq('supabase_uid', verifyData.user.id)
     .single();
 
   if (orgUserError || !orgUser) {
@@ -135,7 +174,7 @@ export async function login(input: LoginInput) {
 
   const normalizedUser = await normalizeCustomerUser(orgUser);
 
-  return { session: signInData.session, user: normalizedUser, organization: normalizedUser.organizations };
+  return { session: verifyData.session, user: normalizedUser, organization: normalizedUser.organizations };
 }
 
 export async function logout(accessToken?: string) {
@@ -144,26 +183,6 @@ export async function logout(accessToken?: string) {
     await supabase.auth.admin.signOut(accessToken, 'global');
   } catch {
     // best-effort; cookies are cleared regardless
-  }
-}
-
-export async function forgotPassword(email: string) {
-  await supabaseAuth.auth.resetPasswordForEmail(email, {
-    redirectTo: `${env.FRONTEND_URL}/reset-password`,
-  });
-}
-
-export async function resetPassword(input: ResetPasswordInput) {
-  const { data, error } = await supabase.auth.getUser(input.accessToken);
-  if (error || !data.user) {
-    throw new AppError(401, 'Invalid or expired reset link');
-  }
-
-  const { error: updateError } = await supabase.auth.admin.updateUserById(data.user.id, {
-    password: input.newPassword,
-  });
-  if (updateError) {
-    throw new AppError(500, 'Failed to update password');
   }
 }
 

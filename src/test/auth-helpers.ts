@@ -1,49 +1,96 @@
-import request from 'supertest';
-import { app } from '../app';
-import { supabase } from '../lib/supabase';
+import crypto from 'crypto';
+import { supabase, supabaseAuth } from '../lib/supabase';
+import { env } from '../config/env';
 
-const TEST_USER = {
-  email: process.env.TEST_USER_EMAIL ?? '',
-  password: process.env.TEST_USER_PASSWORD ?? '',
-};
+const TEST_USER_EMAIL = process.env.TEST_USER_EMAIL ?? '';
 
-// Signs up the dedicated test account on first run, then logs in on every
-// subsequent run once it already exists (signup returns 409 for a duplicate
-// email). Returns the raw Set-Cookie header array so callers can attach it
-// to authenticated requests via .set('Cookie', cookies).
-export async function getTestUserCookies(): Promise<string[]> {
-  if (!TEST_USER.email || !TEST_USER.password) {
-    throw new Error('TEST_USER_EMAIL / TEST_USER_PASSWORD must be set in .env to run auth-middleware tests');
-  }
+function signCookieValue(value: string): string {
+  const signature = crypto.createHmac('sha256', env.COOKIE_SECRET).update(value).digest('base64').replace(/=+$/, '');
+  return encodeURIComponent(`s:${value}.${signature}`);
+}
 
-  const signupRes = await request(app).post('/api/auth/signup').send({
-    firstName: 'Test',
-    lastName: 'Auth',
-    email: TEST_USER.email,
-    company: 'Globonexo Test Org',
-    password: TEST_USER.password,
+async function ensureTestUser(): Promise<void> {
+  const { data: existing } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', TEST_USER_EMAIL)
+    .maybeSingle();
+  if (existing) return;
+
+  const { data: created, error: createError } = await supabase.auth.admin.createUser({
+    email: TEST_USER_EMAIL,
+    email_confirm: true,
   });
-
-  let cookies: string[];
-  if (signupRes.status === 200 || signupRes.status === 201) {
-    cookies = signupRes.headers['set-cookie'] as unknown as string[];
-  } else {
-    const loginRes = await request(app).post('/api/auth/login').send(TEST_USER);
-    if (loginRes.status !== 200) {
-      throw new Error(`Failed to sign up or log in test user: signup=${signupRes.status} login=${loginRes.status} ${loginRes.text}`);
-    }
-    cookies = loginRes.headers['set-cookie'] as unknown as string[];
+  if (createError || !created.user) {
+    throw new Error(`Failed to create test auth user: ${createError?.message}`);
   }
 
-  // This helper represents a provisioned paid test tenant. It keeps the
-  // product-flow tests meaningful while production customers still start in
-  // payment_required and cannot bypass Billing.
-  const me = await request(app).get('/api/auth/me').set('Cookie', cookies);
-  if (me.status === 200 && me.body.organization?.id) {
-    await supabase
-      .from('organizations')
-      .update({ subscription_status: 'active' })
-      .eq('id', me.body.organization.id);
+  const { data: organization, error: orgError } = await supabase
+    .from('organizations')
+    .insert({ name: 'Globonexo Test Org', subscription_status: 'active' })
+    .select()
+    .single();
+  if (orgError || !organization) {
+    throw new Error(`Failed to create test organization: ${orgError?.message}`);
   }
-  return cookies;
+
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .insert({
+      organization_id: organization.id,
+      supabase_uid: created.user.id,
+      email: TEST_USER_EMAIL,
+      first_name: 'Test',
+      last_name: 'Auth',
+      role: 'member',
+    })
+    .select()
+    .single();
+  if (userError || !user) {
+    throw new Error(`Failed to create test user record: ${userError?.message}`);
+  }
+
+  const { error: managerError } = await supabase
+    .from('organizations')
+    .update({ billing_manager_user_id: user.id })
+    .eq('id', organization.id);
+  if (managerError) {
+    throw new Error(`Failed to configure billing ownership: ${managerError.message}`);
+  }
+}
+
+// Auth is OTP-only now, and OTP codes are only ever delivered by email, so
+// integration tests can't drive the real signup/login endpoints end-to-end
+// without a live mailbox. Instead this bootstraps (or reuses) the test auth
+// user directly via the Supabase admin API, mints a session with
+// generateLink + verifyOtp (which redeems a token without sending mail), and
+// hand-signs the session cookies the same way cookie-parser does so the
+// app's authenticate() middleware accepts them like a real login would.
+export async function getTestUserCookies(): Promise<string[]> {
+  if (!TEST_USER_EMAIL) {
+    throw new Error('TEST_USER_EMAIL must be set in .env to run auth-middleware tests');
+  }
+
+  await ensureTestUser();
+
+  const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({
+    type: 'magiclink',
+    email: TEST_USER_EMAIL,
+  });
+  if (linkError || !linkData?.properties?.hashed_token) {
+    throw new Error(`Failed to generate test session link: ${linkError?.message}`);
+  }
+
+  const { data: verifyData, error: verifyError } = await supabaseAuth.auth.verifyOtp({
+    token_hash: linkData.properties.hashed_token,
+    type: 'magiclink',
+  });
+  if (verifyError || !verifyData.session) {
+    throw new Error(`Failed to redeem test session: ${verifyError?.message}`);
+  }
+
+  return [
+    `access_token=${signCookieValue(verifyData.session.access_token)}`,
+    `refresh_token=${signCookieValue(verifyData.session.refresh_token)}`,
+  ];
 }

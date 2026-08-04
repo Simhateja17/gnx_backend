@@ -4,15 +4,24 @@ import { validate } from '../middleware/validate.middleware';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
 import { setAuthCookies, clearAuthCookies } from '../lib/cookies';
 import * as authService from '../services/auth.service';
-import { signupSchema, loginSchema, forgotPasswordSchema, resetPasswordSchema } from '../schemas/auth.schema';
+import { signupStartSchema, signupVerifySchema, loginStartSchema, loginVerifySchema } from '../schemas/auth.schema';
 import { env } from '../config/env';
 import { AppError } from '../types';
 
 const router = Router();
 
-router.post('/signup', authRateLimiter, validate(signupSchema), async (req, res, next) => {
+router.post('/signup/start', authRateLimiter, validate(signupStartSchema), async (req, res, next) => {
   try {
-    const { session, user, organization } = await authService.signup(req.body);
+    await authService.signupStart(req.body);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/signup/verify', authRateLimiter, validate(signupVerifySchema), async (req, res, next) => {
+  try {
+    const { session, user, organization } = await authService.signupVerify(req.body);
     setAuthCookies(res, session);
     res.json({ user, organization });
   } catch (err) {
@@ -20,9 +29,18 @@ router.post('/signup', authRateLimiter, validate(signupSchema), async (req, res,
   }
 });
 
-router.post('/login', authRateLimiter, validate(loginSchema), async (req, res, next) => {
+router.post('/login/start', authRateLimiter, validate(loginStartSchema), async (req, res, next) => {
   try {
-    const { session, user, organization } = await authService.login(req.body);
+    await authService.loginStart(req.body);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/login/verify', authRateLimiter, validate(loginVerifySchema), async (req, res, next) => {
+  try {
+    const { session, user, organization } = await authService.loginVerify(req.body);
     setAuthCookies(res, session);
     res.json({ user, organization });
   } catch (err) {
@@ -42,24 +60,6 @@ router.post('/logout', authRateLimiter, async (req, res, next) => {
 
 router.get('/me', authenticate, (req: AuthenticatedRequest, res) => {
   res.json({ user: req.user, organization: req.organization });
-});
-
-router.post('/forgot-password', authRateLimiter, validate(forgotPasswordSchema), async (req, res, next) => {
-  try {
-    await authService.forgotPassword(req.body.email);
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post('/reset-password', authRateLimiter, validate(resetPasswordSchema), async (req, res, next) => {
-  try {
-    await authService.resetPassword(req.body);
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
-  }
 });
 
 // Initiate Google OAuth — redirects browser through Supabase to Google
