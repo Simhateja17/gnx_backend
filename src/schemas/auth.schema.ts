@@ -1,29 +1,27 @@
 import { z } from 'zod';
 
-const passwordSchema = z
+const otpSchema = z
   .string()
-  .min(8, 'Password must be at least 8 characters')
-  .regex(/[0-9]/, 'Password must contain at least one number')
-  .regex(/[^A-Za-z0-9]/, 'Password must contain at least one symbol');
+  .trim()
+  .regex(/^\d{6}$/, 'Enter the 6-digit code');
 
-export const signupSchema = z.object({
+export const signupStartSchema = z.object({
   firstName: z.string().min(1, 'First name is required'),
   lastName: z.string().min(1, 'Last name is required'),
   email: z.string().email('Invalid email address'),
   company: z.string().min(1, 'Company name is required'),
-  password: passwordSchema,
 });
 
-export const loginSchema = z.object({
+export const signupVerifySchema = z.object({
   email: z.string().email('Invalid email address'),
-  password: z.string().min(1, 'Password is required'),
+  otp: otpSchema,
 });
 
-export const forgotPasswordSchema = z.object({
+export const loginStartSchema = z.object({
   email: z.string().email('Invalid email address'),
 });
 
-export const resetPasswordSchema = z.object({
-  accessToken: z.string().min(1, 'Access token is required'),
-  newPassword: passwordSchema,
+export const loginVerifySchema = z.object({
+  email: z.string().email('Invalid email address'),
+  otp: otpSchema,
 });
