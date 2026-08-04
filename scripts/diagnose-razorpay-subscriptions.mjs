@@ -92,17 +92,24 @@ async function main() {
     const shape = errorShape(error);
     console.log(`  ${JSON.stringify(shape)}`);
 
+    // The discriminator is whether the bogus plan produces a DIFFERENT error
+    // than the real plans do. Matching on wording is unreliable — compare
+    // against the exact string the real plans return.
+    const REAL_PLAN_DESCRIPTION = 'Validation failed';
+    const sameAsRealPlans = (shape.description ?? '').trim() === REAL_PLAN_DESCRIPTION;
+
     console.log('\nInterpretation:');
-    if (shape.field || /plan/i.test(shape.description ?? '')) {
-      console.log('  Razorpay reached PLAN RESOLUTION for a bogus plan, which means the');
-      console.log('  account-level subscription gate is NOT blocking requests. The bare');
-      console.log('  "Validation failed" seen for your real USD plans is therefore specific');
-      console.log('  to those plans — most likely their USD currency.');
-    } else {
+    if (sameAsRealPlans) {
       console.log('  Razorpay returned the SAME bare error for a plan that does not exist.');
       console.log('  Validation is failing BEFORE plan lookup, so the rejection is an');
       console.log('  account-level capability gate on Subscriptions for this account/mode —');
       console.log('  not anything about your plans or your payload.');
+    } else {
+      console.log('  Razorpay returned a DIFFERENT, plan-lookup-specific error here, but');
+      console.log('  "Validation failed" for your real plans. Validation therefore gets PAST');
+      console.log('  the account-level checks and PAST plan resolution, then fails on a');
+      console.log('  property of the resolved plan. Currency (USD) is the only non-default');
+      console.log('  property those plans carry.');
     }
   }
 }
