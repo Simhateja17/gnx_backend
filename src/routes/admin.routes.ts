@@ -57,9 +57,9 @@ router.post('/organizations/:id/suspend', async (req: AuthenticatedRequest, res:
 
 router.post('/organizations/:id/impersonate', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
-    const token = await adminService.createImpersonationToken(req.params.id, req.user.id);
-    setImpersonationCookie(res, token);
-    res.json(token);
+    const impersonation = await adminService.createImpersonationToken(req.params.id, req.user.id);
+    setImpersonationCookie(res, impersonation.token);
+    res.json(impersonation);
   } catch (err) {
     next(err);
   }
