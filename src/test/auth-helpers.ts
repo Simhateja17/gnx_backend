@@ -27,23 +27,35 @@ async function ensureTestUser(): Promise<void> {
 
   const { data: organization, error: orgError } = await supabase
     .from('organizations')
-    .insert({ name: 'Globonexo Test Org' })
+    .insert({ name: 'Globonexo Test Org', subscription_status: 'active' })
     .select()
     .single();
   if (orgError || !organization) {
     throw new Error(`Failed to create test organization: ${orgError?.message}`);
   }
 
-  const { error: userError } = await supabase.from('users').insert({
-    organization_id: organization.id,
-    supabase_uid: created.user.id,
-    email: TEST_USER_EMAIL,
-    first_name: 'Test',
-    last_name: 'Auth',
-    role: 'owner',
-  });
-  if (userError) {
-    throw new Error(`Failed to create test user record: ${userError.message}`);
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .insert({
+      organization_id: organization.id,
+      supabase_uid: created.user.id,
+      email: TEST_USER_EMAIL,
+      first_name: 'Test',
+      last_name: 'Auth',
+      role: 'member',
+    })
+    .select()
+    .single();
+  if (userError || !user) {
+    throw new Error(`Failed to create test user record: ${userError?.message}`);
+  }
+
+  const { error: managerError } = await supabase
+    .from('organizations')
+    .update({ billing_manager_user_id: user.id })
+    .eq('id', organization.id);
+  if (managerError) {
+    throw new Error(`Failed to configure billing ownership: ${managerError.message}`);
   }
 }
 

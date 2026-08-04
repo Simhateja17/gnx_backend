@@ -15,6 +15,7 @@ export interface Organization {
   website?: string;
   plan_id: string;
   subscription_status: string;
+  billing_manager_user_id?: string | null;
 }
 
 export interface User {
@@ -24,5 +25,5 @@ export interface User {
   email: string;
   first_name?: string;
   last_name?: string;
-  role: string;
+  role: 'member' | 'admin' | string;
 }

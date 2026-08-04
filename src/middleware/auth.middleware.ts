@@ -66,7 +66,7 @@ export async function authenticate(req: AuthenticatedRequest, res: Response, nex
     if (accessToken) {
       const { data: { user }, error } = await supabase.auth.getUser(accessToken);
       if (!error && user) {
-        const orgUser = await loadOrgUser(user.id);
+        const orgUser = await authService.normalizeCustomerUser(await loadOrgUser(user.id));
         req.user = orgUser;
         req.organization = orgUser.organizations;
         req.accessToken = accessToken;
@@ -87,7 +87,7 @@ export async function authenticate(req: AuthenticatedRequest, res: Response, nex
       throw new AppError(401, 'Invalid or expired session');
     }
 
-    const orgUser = await loadOrgUser(user.id);
+    const orgUser = await authService.normalizeCustomerUser(await loadOrgUser(user.id));
     req.user = orgUser;
     req.organization = orgUser.organizations;
     req.accessToken = session.access_token;

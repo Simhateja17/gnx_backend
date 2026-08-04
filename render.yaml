@@ -65,6 +65,18 @@ services:
         sync: false
       - key: RAZORPAY_PLAN_SCALE_ANNUAL_TOTAL_AMOUNT
         sync: false
+      - key: RAZORPAY_SUBSCRIPTION_PLAN_STARTER_MONTHLY_ID
+        sync: false
+      - key: RAZORPAY_SUBSCRIPTION_PLAN_STARTER_ANNUAL_ID
+        sync: false
+      - key: RAZORPAY_SUBSCRIPTION_PLAN_GROWTH_MONTHLY_ID
+        sync: false
+      - key: RAZORPAY_SUBSCRIPTION_PLAN_GROWTH_ANNUAL_ID
+        sync: false
+      - key: RAZORPAY_SUBSCRIPTION_PLAN_SCALE_MONTHLY_ID
+        sync: false
+      - key: RAZORPAY_SUBSCRIPTION_PLAN_SCALE_ANNUAL_ID
+        sync: false
       - key: BILLING_GRACE_PERIOD_DAYS
         sync: false
       - key: RESEND_API_KEY
@@ -138,6 +150,18 @@ services:
       - key: RAZORPAY_PLAN_SCALE_MONTHLY_AMOUNT
         sync: false
       - key: RAZORPAY_PLAN_SCALE_ANNUAL_TOTAL_AMOUNT
+        sync: false
+      - key: RAZORPAY_SUBSCRIPTION_PLAN_STARTER_MONTHLY_ID
+        sync: false
+      - key: RAZORPAY_SUBSCRIPTION_PLAN_STARTER_ANNUAL_ID
+        sync: false
+      - key: RAZORPAY_SUBSCRIPTION_PLAN_GROWTH_MONTHLY_ID
+        sync: false
+      - key: RAZORPAY_SUBSCRIPTION_PLAN_GROWTH_ANNUAL_ID
+        sync: false
+      - key: RAZORPAY_SUBSCRIPTION_PLAN_SCALE_MONTHLY_ID
+        sync: false
+      - key: RAZORPAY_SUBSCRIPTION_PLAN_SCALE_ANNUAL_ID
         sync: false
       - key: BILLING_GRACE_PERIOD_DAYS
         sync: false

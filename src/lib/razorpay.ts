@@ -24,3 +24,9 @@ export function verifyRazorpayWebhookSignature(rawBody: string, signature: strin
 export function verifyRazorpayCheckoutSignature(orderId: string, paymentId: string, signature: string): boolean {
   return validatePaymentVerification({ order_id: orderId, payment_id: paymentId }, signature, env.RAZORPAY_KEY_SECRET);
 }
+
+export function verifyRazorpaySubscriptionSignature(subscriptionId: string, paymentId: string, signature: string): boolean {
+  // Razorpay signs subscription authorisation callbacks as
+  // `razorpay_payment_id|razorpay_subscription_id`.
+  return validatePaymentVerification({ subscription_id: subscriptionId, payment_id: paymentId }, signature, env.RAZORPAY_KEY_SECRET);
+}

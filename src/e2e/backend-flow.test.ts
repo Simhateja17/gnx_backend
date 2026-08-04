@@ -88,7 +88,7 @@ describe('E2E: email campaign — create, add leads, launch', () => {
         { firstName: 'Grace', lastName: 'Hopper', email: 'grace.e2e-test@example.invalid', company: 'Compiler Co' },
       ],
     });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);
     expect(res.body.inserted).toBe(2);
     createdLeadIds.push(...res.body.items.map((l: any) => l.id));
   });
