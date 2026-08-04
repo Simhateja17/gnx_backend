@@ -221,10 +221,9 @@ export async function createImpersonationToken(id: string, adminUserId: string) 
 
 // The token is base64url(payload) + '.' + an HMAC of that payload signed with
 // a server-only secret, so it can't be forged by constructing a similar-looking
-// JSON blob — the same shape as a lightweight JWT. Nothing decodes this token
-// yet (no "redeem impersonation token" endpoint exists), but verifyImpersonationToken
-// is here so a future consumer checks the signature and expiry instead of
-// trusting the payload as-is.
+// JSON blob — the same shape as a lightweight JWT. auth.middleware.ts calls
+// verifyImpersonationToken on every request to check the signature and expiry
+// before trusting the impersonation cookie's payload.
 function signImpersonationPayload(payload: Record<string, unknown>): string {
   const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const signature = crypto.createHmac('sha256', env.JWT_SECRET).update(encoded).digest('base64url');

@@ -235,6 +235,197 @@ export async function rejectAiDraftReply(organizationId: string, replyId: string
   return data;
 }
 
+type EarlyFollowUpCandidate = {
+  id: string;
+  campaign_id: string;
+  first_name: string | null;
+  last_name: string | null;
+  name: string | null;
+  company: string | null;
+  campaigns?: { status?: string } | null;
+};
+
+type DraftedFollowUp = {
+  id: string;
+  leadId: string;
+  leadName: string;
+  company: string | null;
+  subject: string;
+  body: string;
+};
+
+async function draftFollowUpForLead(
+  organizationId: string,
+  lead: EarlyFollowUpCandidate,
+): Promise<DraftedFollowUp | null> {
+  const nextStepNumber = await getNextStepNumber(lead.id, lead.campaign_id);
+
+  const { data: nextStep, error: stepError } = await supabase
+    .from('email_sequence_steps')
+    .select('id, step_number')
+    .eq('campaign_id', lead.campaign_id)
+    .eq('step_number', nextStepNumber)
+    .maybeSingle();
+
+  if (stepError) throw new AppError(500, 'Failed to fetch next sequence step', stepError);
+  if (!nextStep) return null;
+
+  const { data: existing, error: existingError } = await supabase
+    .from('email_messages')
+    .select('id')
+    .eq('organization_id', organizationId)
+    .eq('campaign_id', lead.campaign_id)
+    .eq('lead_id', lead.id)
+    .eq('step_number', nextStep.step_number)
+    .maybeSingle();
+
+  if (existingError) throw new AppError(500, 'Failed to check existing follow-up draft', existingError);
+  if (existing) return null;
+
+  const generated = await generateEmail(organizationId, {
+    campaignId: lead.campaign_id,
+    leadId: lead.id,
+    stepNumber: nextStep.step_number,
+  });
+
+  const { data: inserted, error: insertError } = await supabase
+    .from('email_messages')
+    .insert({
+      organization_id: organizationId,
+      campaign_id: lead.campaign_id,
+      lead_id: lead.id,
+      sequence_step_id: nextStep.id,
+      step_number: nextStep.step_number,
+      subject: generated.subject,
+      body: generated.body,
+      status: 'pending_review',
+    })
+    .select('id, subject, body')
+    .single();
+
+  if (insertError || !inserted) throw new AppError(500, 'Failed to save drafted follow-up', insertError);
+
+  const leadName = [lead.first_name, lead.last_name].filter(Boolean).join(' ') || lead.name || 'Unknown';
+
+  return {
+    id: inserted.id,
+    leadId: lead.id,
+    leadName,
+    company: lead.company,
+    subject: inserted.subject,
+    body: inserted.body,
+  };
+}
+
+// Powers the AI agent's "draft follow-ups for no-replies" tool. Sequences
+// already auto-send step 2/3 on their own delay_days schedule via
+// enqueueNextSequenceStep() above - this generates that same next step early,
+// on demand, but holds it as 'pending_review' instead of queuing it for send,
+// so a human approves before it goes out.
+export async function draftEarlyFollowUps(
+  organizationId: string,
+  options: { leadId?: string; limit?: number } = {},
+) {
+  const limit = Math.min(options.limit ?? 10, 10);
+
+  let query = supabase
+    .from('leads')
+    .select('id, campaign_id, first_name, last_name, name, company, email, status, campaigns(status)')
+    .eq('organization_id', organizationId)
+    .eq('status', 'contacted')
+    .not('email', 'is', null)
+    .not('campaign_id', 'is', null);
+
+  if (options.leadId) query = query.eq('id', options.leadId);
+
+  const { data, error } = await query;
+  if (error) throw new AppError(500, 'Failed to fetch leads for follow-up drafting', error);
+
+  const candidates = ((data ?? []) as unknown as EarlyFollowUpCandidate[])
+    .filter(lead => lead.campaigns?.status === 'active');
+
+  const totalOverdue = candidates.length;
+  const batch = candidates.slice(0, limit);
+
+  const results = await Promise.allSettled(batch.map(lead => draftFollowUpForLead(organizationId, lead)));
+
+  const drafted = results
+    .filter((r): r is PromiseFulfilledResult<DraftedFollowUp> => r.status === 'fulfilled' && r.value !== null)
+    .map(r => r.value);
+
+  return { drafted, draftedCount: drafted.length, totalOverdue };
+}
+
+export async function approvePendingDraft(organizationId: string, messageId: string) {
+  const { data: message, error } = await supabase
+    .from('email_messages')
+    .select('id, campaign_id, lead_id, status')
+    .eq('id', messageId)
+    .eq('organization_id', organizationId)
+    .single();
+
+  if (error || !message) throw new AppError(404, 'Draft email not found');
+  if (message.status !== 'pending_review') {
+    throw new AppError(400, `Draft is not pending review (status: ${message.status})`);
+  }
+
+  await supabase
+    .from('email_messages')
+    .update({ status: 'queued' })
+    .eq('id', messageId)
+    .eq('organization_id', organizationId);
+
+  await enqueueSendEmail({
+    emailMessageId: messageId,
+    organizationId,
+    campaignId: message.campaign_id ?? undefined,
+    leadId: message.lead_id,
+  }, {
+    jobId: `send-email-${messageId}`,
+  });
+
+  return { id: messageId, status: 'queued' };
+}
+
+export async function rejectPendingDraft(organizationId: string, messageId: string) {
+  const { data, error } = await supabase
+    .from('email_messages')
+    .update({ status: 'skipped' })
+    .eq('id', messageId)
+    .eq('organization_id', organizationId)
+    .eq('status', 'pending_review')
+    .select('id, status')
+    .maybeSingle();
+
+  if (error) throw new AppError(500, 'Failed to reject draft', error);
+  if (!data) throw new AppError(404, 'Pending draft not found');
+  return data;
+}
+
+export async function updatePendingDraft(
+  organizationId: string,
+  messageId: string,
+  updates: { subject?: string; body?: string },
+) {
+  const patch: Record<string, unknown> = {};
+  if (updates.subject !== undefined) patch.subject = updates.subject.trim();
+  if (updates.body !== undefined) patch.body = updates.body.trim();
+  if (Object.keys(patch).length === 0) throw new AppError(400, 'No fields to update');
+
+  const { data, error } = await supabase
+    .from('email_messages')
+    .update(patch)
+    .eq('id', messageId)
+    .eq('organization_id', organizationId)
+    .eq('status', 'pending_review')
+    .select('id, subject, body, status')
+    .maybeSingle();
+
+  if (error) throw new AppError(500, 'Failed to update draft', error);
+  if (!data) throw new AppError(404, 'Pending draft not found');
+  return data;
+}
+
 export async function sendEmail(emailMessageId: string, organizationId: string) {
   console.log(`[send-email] Starting message ${emailMessageId} for org ${organizationId}`);
 
@@ -303,7 +494,7 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
 
       await supabase
         .from('email_messages')
-        .update({ subject, body })
+        .update({ subject, body, context_snapshot_id: generated.contextSnapshotId })
         .eq('id', emailMessageId);
     }
   }

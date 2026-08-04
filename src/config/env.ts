@@ -16,6 +16,7 @@ const envSchema = z.object({
   GOOGLE_CLIENT_ID: z.string().trim().default(''),
   GOOGLE_CLIENT_SECRET: z.string().trim().default(''),
   GOOGLE_REDIRECT_URI: z.string().default('http://localhost:5000/api/gmail/callback'),
+  GOOGLE_CALENDAR_REDIRECT_URI: z.string().default('http://localhost:5000/api/calendar/callback'),
 
   AZURE_OPENAI_ENDPOINT: z.string().default(''),
   AZURE_OPENAI_API_KEY: z.string().trim().default(''),
@@ -24,14 +25,57 @@ const envSchema = z.object({
 
   RETELL_API_KEY: z.string().trim().default(''),
   RETELL_WEBHOOK_SECRET: z.string().trim().default(''),
+  RETELL_DEFAULT_COUNTRY: z.enum(['US', 'CA']).default('US'),
 
   APOLLO_API_KEY: z.string().trim().default(''),
+  APOLLO_ENRICHMENT_WEBHOOK_URL: z.string().trim().url().optional().or(z.literal('')),
+  APOLLO_ENRICHMENT_WEBHOOK_SECRET: z.string().trim().default(''),
+  APOLLO_REVEAL_PERSONAL_EMAILS: z.preprocess(
+    (value) => typeof value === 'string' ? value.toLowerCase() === 'true' : value,
+    z.boolean().default(false),
+  ),
+  APOLLO_REVEAL_PHONE_NUMBER: z.preprocess(
+    (value) => typeof value === 'string' ? value.toLowerCase() === 'true' : value,
+    z.boolean().default(false),
+  ),
+  APOLLO_RUN_WATERFALL_EMAIL: z.preprocess(
+    (value) => typeof value === 'string' ? value.toLowerCase() === 'true' : value,
+    z.boolean().default(false),
+  ),
+  APOLLO_RUN_WATERFALL_PHONE: z.preprocess(
+    (value) => typeof value === 'string' ? value.toLowerCase() === 'true' : value,
+    z.boolean().default(false),
+  ),
 
-  STRIPE_SECRET_KEY: z.string().trim().default(''),
-  STRIPE_WEBHOOK_SECRET: z.string().trim().default(''),
-  STRIPE_PRICE_STARTER: z.string().trim().default(''),
-  STRIPE_PRICE_GROWTH: z.string().trim().default(''),
-  STRIPE_PRICE_SCALE: z.string().trim().default(''),
+  RAZORPAY_KEY_ID: z.string().trim().default(''),
+  RAZORPAY_KEY_SECRET: z.string().trim().default(''),
+  RAZORPAY_WEBHOOK_SECRET: z.string().trim().default(''),
+  RAZORPAY_CURRENCY: z.string().trim().regex(/^[A-Z]{3}$/).default('USD'),
+  RAZORPAY_INTERNATIONAL_PAYMENTS_ENABLED: z.preprocess(
+    (value) => typeof value === 'string' ? value.toLowerCase() === 'true' : value,
+    z.boolean().default(false),
+  ),
+
+  // Plan prices in the smallest currency unit. Annual amounts are the full
+  // amount charged for the annual billing period, not the monthly display price.
+  RAZORPAY_PLAN_STARTER_MONTHLY_AMOUNT: z.coerce.number().default(5900),
+  RAZORPAY_PLAN_STARTER_ANNUAL_TOTAL_AMOUNT: z.coerce.number().default(58800),
+  RAZORPAY_PLAN_GROWTH_MONTHLY_AMOUNT: z.coerce.number().default(17900),
+  RAZORPAY_PLAN_GROWTH_ANNUAL_TOTAL_AMOUNT: z.coerce.number().default(178800),
+  RAZORPAY_PLAN_SCALE_MONTHLY_AMOUNT: z.coerce.number().default(47900),
+  RAZORPAY_PLAN_SCALE_ANNUAL_TOTAL_AMOUNT: z.coerce.number().default(478800),
+
+  // Razorpay Plan IDs are account-owned values. Keep them explicit rather
+  // than deriving them from amounts so a plan can never be silently changed
+  // by a pricing-only deployment.
+  RAZORPAY_SUBSCRIPTION_PLAN_STARTER_MONTHLY_ID: z.string().trim().default(''),
+  RAZORPAY_SUBSCRIPTION_PLAN_STARTER_ANNUAL_ID: z.string().trim().default(''),
+  RAZORPAY_SUBSCRIPTION_PLAN_GROWTH_MONTHLY_ID: z.string().trim().default(''),
+  RAZORPAY_SUBSCRIPTION_PLAN_GROWTH_ANNUAL_ID: z.string().trim().default(''),
+  RAZORPAY_SUBSCRIPTION_PLAN_SCALE_MONTHLY_ID: z.string().trim().default(''),
+  RAZORPAY_SUBSCRIPTION_PLAN_SCALE_ANNUAL_ID: z.string().trim().default(''),
+
+  BILLING_GRACE_PERIOD_DAYS: z.coerce.number().default(7),
 
   RESEND_API_KEY: z.string().trim().default(''),
   RESEND_FROM_EMAIL: z.string().default('noreply@globonexo.com'),

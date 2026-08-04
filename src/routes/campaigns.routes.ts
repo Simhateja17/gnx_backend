@@ -1,6 +1,7 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
 import { validate } from '../middleware/validate.middleware';
+import { requireActiveSubscription } from '../middleware/billing.middleware';
 import { assignLeadsSchema, campaignCreateSchema, campaignUpdateSchema, sequenceStepsUpsertSchema } from '../schemas/campaigns.schema';
 import {
   assignLeadsToCampaign,
@@ -18,6 +19,7 @@ import { AppError } from '../types';
 const router = Router();
 
 router.use(authenticate);
+router.use(requireActiveSubscription);
 
 function getOrgId(req: AuthenticatedRequest) {
   const orgId = req.organization?.id;
@@ -33,7 +35,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response, next: NextFunct
   }
 });
 
-router.post('/', validate(campaignCreateSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+router.post('/', requireActiveSubscription, validate(campaignCreateSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     res.status(201).json(await createCampaign(getOrgId(req), req.body));
   } catch (err) {
@@ -57,7 +59,7 @@ router.put('/:id', validate(campaignUpdateSchema), async (req: AuthenticatedRequ
   }
 });
 
-router.post('/:id/launch', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+router.post('/:id/launch', requireActiveSubscription, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     res.json(await setCampaignStatus(getOrgId(req), req.params.id, 'active'));
   } catch (err) {
@@ -89,7 +91,7 @@ router.put('/:id/steps', validate(sequenceStepsUpsertSchema), async (req: Authen
   }
 });
 
-router.post('/:id/assign-leads', validate(assignLeadsSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+router.post('/:id/assign-leads', requireActiveSubscription, validate(assignLeadsSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     res.json(await assignLeadsToCampaign(getOrgId(req), req.params.id, req.body));
   } catch (err) {

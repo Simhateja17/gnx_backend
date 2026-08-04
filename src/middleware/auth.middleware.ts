@@ -2,11 +2,13 @@ import { Request, Response, NextFunction } from 'express';
 import { supabase } from '../lib/supabase';
 import { setAuthCookies } from '../lib/cookies';
 import * as authService from '../services/auth.service';
+import { verifyImpersonationToken } from '../services/admin.service';
 import { AppError } from '../types';
 
 export interface AuthenticatedRequest extends Request {
   user?: any;
   organization?: any;
+  accessToken?: string;
 }
 
 async function loadOrgUser(supabaseUid: string) {
@@ -41,9 +43,8 @@ async function loadOrgUserById(userId: string, organizationId: string) {
 function readImpersonationToken(token?: string) {
   if (!token) return null;
   try {
-    const payload = JSON.parse(Buffer.from(token, 'base64url').toString('utf-8'));
-    if (!payload?.userId || !payload?.organizationId || !payload?.expiresAt) return null;
-    if (new Date(payload.expiresAt).getTime() <= Date.now()) return null;
+    const payload = verifyImpersonationToken(token);
+    if (!payload?.userId || !payload?.organizationId) return null;
     return payload as { userId: string; organizationId: string; adminUserId?: string; expiresAt: string };
   } catch {
     return null;
@@ -65,9 +66,10 @@ export async function authenticate(req: AuthenticatedRequest, res: Response, nex
     if (accessToken) {
       const { data: { user }, error } = await supabase.auth.getUser(accessToken);
       if (!error && user) {
-        const orgUser = await loadOrgUser(user.id);
+        const orgUser = await authService.normalizeCustomerUser(await loadOrgUser(user.id));
         req.user = orgUser;
         req.organization = orgUser.organizations;
+        req.accessToken = accessToken;
         return next();
       }
     }
@@ -85,9 +87,10 @@ export async function authenticate(req: AuthenticatedRequest, res: Response, nex
       throw new AppError(401, 'Invalid or expired session');
     }
 
-    const orgUser = await loadOrgUser(user.id);
+    const orgUser = await authService.normalizeCustomerUser(await loadOrgUser(user.id));
     req.user = orgUser;
     req.organization = orgUser.organizations;
+    req.accessToken = session.access_token;
     next();
   } catch (err) {
     next(err);

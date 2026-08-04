@@ -15,11 +15,18 @@ vi.mock('bullmq', () => {
       addCalls[this.queueName].push({ name, data, options });
       return { id: 'mock-job-id' };
     }
+    on() {
+      return this;
+    }
   }
   return { Queue: MockQueue };
 });
 
-vi.mock('../lib/redis', () => ({ redisConnection: {}, queueConnection: {} }));
+vi.mock('../lib/redis', () => ({
+  redisConnection: {},
+  queueConnection: {},
+  silenceQueueErrors: vi.fn(),
+}));
 
 import { enqueueSendEmail } from './send-email.job';
 import { enqueuePollInbox } from './poll-inbox.job';

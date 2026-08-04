@@ -7,7 +7,7 @@ CREATE TABLE organizations (
   name TEXT NOT NULL,
   website TEXT,
   plan_id TEXT NOT NULL DEFAULT 'starter',
-  subscription_status TEXT NOT NULL DEFAULT 'trialing',
+  subscription_status TEXT NOT NULL DEFAULT 'payment_required',
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -20,7 +20,7 @@ CREATE TABLE users (
   email TEXT UNIQUE NOT NULL,
   first_name TEXT,
   last_name TEXT,
-  role TEXT NOT NULL DEFAULT 'owner',
+  role TEXT NOT NULL DEFAULT 'member',
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -184,7 +184,6 @@ CREATE TABLE subscriptions (
   stripe_subscription_id TEXT,
   plan_id TEXT NOT NULL,
   status TEXT NOT NULL,
-  trial_ends_at TIMESTAMPTZ,
   current_period_start TIMESTAMPTZ,
   current_period_end TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW(),

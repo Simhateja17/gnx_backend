@@ -27,3 +27,9 @@ export const VOICE_DEFAULTS = {
 };
 
 export const APOLLO_ENRICHMENT_CAP = 100;
+
+// Guardrails for the AI agent's "get me N ICP leads" tool: never fetch more
+// than this many net-new leads in one request, and never make more than this
+// many Apollo search calls chasing that count (each call costs real credits).
+export const AGENT_ICP_SEARCH_MAX_LEADS = 100;
+export const AGENT_ICP_SEARCH_MAX_ATTEMPTS = 5;

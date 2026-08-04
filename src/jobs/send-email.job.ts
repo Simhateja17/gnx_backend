@@ -1,5 +1,5 @@
 import { JobsOptions, Queue } from 'bullmq';
-import { queueConnection } from '../lib/redis';
+import { queueConnection, silenceQueueErrors } from '../lib/redis';
 
 export interface SendEmailJobData {
   emailMessageId: string;
@@ -10,6 +10,7 @@ export interface SendEmailJobData {
 }
 
 const sendEmailQueue = new Queue<SendEmailJobData, any, string>('send-email', { connection: queueConnection });
+silenceQueueErrors(sendEmailQueue, 'send-email');
 
 export async function enqueueSendEmail(data: SendEmailJobData, options: JobsOptions = {}) {
   return sendEmailQueue.add('send-email', data, {

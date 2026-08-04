@@ -15,8 +15,13 @@ function mapMeeting(row: any) {
     scheduledAt: row.scheduled_at,
     durationMinutes: row.duration_minutes,
     joinUrl: row.join_url,
+    conferenceUrl: row.conference_url ?? null,
     status: row.status,
     source: row.source,
+    provider: row.provider ?? null,
+    providerCalendarId: row.provider_calendar_id ?? null,
+    attendeeEmail: row.attendee_email ?? null,
+    timezone: row.timezone ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lead: lead ? {
@@ -52,24 +57,25 @@ export async function listMeetings(orgId: string) {
   const todayStart = startOfToday();
   const tomorrowStart = startOfTomorrow();
 
-  const [meetingsResult, configResult] = await Promise.all([
+  const [meetingsResult, calendarResult] = await Promise.all([
     supabase
       .from('meetings')
-      .select('id,title,scheduled_at,duration_minutes,join_url,status,source,created_at,updated_at,leads(id,first_name,last_name,name,title,company,email),campaigns(id,name)')
+      .select('id,title,scheduled_at,duration_minutes,join_url,conference_url,status,source,provider,provider_calendar_id,attendee_email,timezone,created_at,updated_at,leads(id,first_name,last_name,name,title,company,email),campaigns(id,name)')
       .eq('organization_id', orgId)
       .order('scheduled_at', { ascending: true }),
     supabase
-      .from('agent_configs')
-      .select('booking_link')
+      .from('calendar_connections')
+      .select('provider,connected_email,selected_calendar_id,selected_calendar_name,timezone,status,last_error')
       .eq('organization_id', orgId)
+      .eq('provider', 'google')
       .maybeSingle(),
   ]);
 
   if (meetingsResult.error) {
     throw new AppError(500, 'Failed to fetch meetings', meetingsResult.error);
   }
-  if (configResult.error) {
-    throw new AppError(500, 'Failed to fetch booking link', configResult.error);
+  if (calendarResult.error) {
+    throw new AppError(500, 'Failed to fetch Google Calendar status', calendarResult.error);
   }
 
   const meetings = (meetingsResult.data ?? []).map(mapMeeting);
@@ -87,7 +93,19 @@ export async function listMeetings(orgId: string) {
   }).sort((a, b) => new Date(b.scheduledAt).getTime() - new Date(a.scheduledAt).getTime());
 
   return {
-    bookingLink: configResult.data?.booking_link ?? '',
+    // Kept as an empty compatibility field while the frontend migrates from
+    // booking-link CTAs to the Calendar connection controls.
+    bookingLink: '',
+    calendar: {
+      connected: calendarResult.data?.status === 'connected',
+      provider: calendarResult.data?.provider ?? 'google',
+      email: calendarResult.data?.connected_email ?? null,
+      selectedCalendarId: calendarResult.data?.selected_calendar_id ?? null,
+      selectedCalendarName: calendarResult.data?.selected_calendar_name ?? null,
+      timezone: calendarResult.data?.timezone ?? 'UTC',
+      status: calendarResult.data?.status ?? 'disconnected',
+      lastError: calendarResult.data?.last_error ?? null,
+    },
     summary: {
       total: meetings.length,
       today: today.length,

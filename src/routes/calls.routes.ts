@@ -1,11 +1,13 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
+import { requireActiveSubscription } from '../middleware/billing.middleware';
 import { supabase } from '../lib/supabase';
 import * as voiceService from '../services/voice.service';
 import { AppError } from '../types';
 
 const router = Router();
 router.use(authenticate);
+router.use(requireActiveSubscription);
 
 router.get('/', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {

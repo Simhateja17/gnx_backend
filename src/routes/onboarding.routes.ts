@@ -1,5 +1,6 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
+import { requireActiveSubscription } from '../middleware/billing.middleware';
 import { validate } from '../middleware/validate.middleware';
 import { onboardingPostSchema, onboardingPutSchema } from '../schemas/onboarding.schema';
 import { submitOnboarding, getOnboarding } from '../services/onboarding.service';
@@ -7,6 +8,7 @@ import { submitOnboarding, getOnboarding } from '../services/onboarding.service'
 const router = Router();
 
 router.use(authenticate);
+router.use(requireActiveSubscription);
 
 router.post('/', validate(onboardingPostSchema), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {

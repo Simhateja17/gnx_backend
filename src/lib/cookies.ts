@@ -49,8 +49,8 @@ export function clearAuthCookies(res: Response) {
   res.clearCookie('impersonation_token', options);
 }
 
-export function setImpersonationCookie(res: Response, payload: Record<string, unknown>) {
-  res.cookie('impersonation_token', Buffer.from(JSON.stringify(payload)).toString('base64url'), {
+export function setImpersonationCookie(res: Response, signedToken: string) {
+  res.cookie('impersonation_token', signedToken, {
     ...baseCookieOptions(),
     maxAge: IMPERSONATION_MAX_AGE,
   });

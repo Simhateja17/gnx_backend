@@ -6,6 +6,7 @@ import { AppError } from '../types';
 import { ensureAgentConfig } from './agent-config.service';
 import { parsePromptContext, serializePromptContext } from '../lib/prompt-context';
 import type { AssignLeadsInput, CampaignCreateInput, CampaignUpdateInput, SequenceStepsUpsertInput } from '../schemas/campaigns.schema';
+import { normalizePhoneForCalling } from '../lib/phone';
 
 type CampaignChannel = 'email' | 'voice' | 'both';
 
@@ -292,7 +293,7 @@ export async function setCampaignStatus(
     // 'both' campaign the calls can still carry the launch, so only block when
     // neither channel has anything to work with.
     if (readiness.ready === 0) {
-      const callable = voiceEnabled ? await countCallableLeads(orgId, id) : 0;
+      const callable = voiceEnabled ? await countCallableLeads(orgId, id, current.timezone) : 0;
       if (callable === 0) {
         throw new AppError(
           400,
@@ -379,11 +380,21 @@ async function enqueueVoiceCalls(
     .eq('organization_id', orgId)
     .single();
 
-  if (!agentConfig?.retell_phone_number) {
+  const { data: provisionedPhone } = await supabase
+    .from('retell_phone_numbers')
+    .select('phone_number')
+    .eq('organization_id', orgId)
+    .eq('entitlement_kind', 'included')
+    .eq('status', 'active')
+    .not('phone_number', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const fromNumber = provisionedPhone?.phone_number ?? agentConfig?.retell_phone_number;
+  if (!fromNumber) {
     throw new AppError(400, 'Add your Retell phone number in Settings before launching a voice campaign');
   }
-
-  const fromNumber = agentConfig.retell_phone_number;
 
   const { data: leads, error: leadsError } = await supabase
     .from('leads')
@@ -394,9 +405,11 @@ async function enqueueVoiceCalls(
 
   if (leadsError) throw new AppError(500, 'Failed to fetch campaign leads', leadsError);
 
-  const eligibleLeads = (leads ?? []).filter(
-    lead => lead.phone && !STOP_CALLING_STATUSES.includes(lead.status),
-  );
+  const eligibleLeads = (leads ?? []).flatMap(lead => {
+    if (!lead.phone || STOP_CALLING_STATUSES.includes(lead.status)) return [];
+    const toNumber = normalizePhoneForCalling(lead.phone, campaign.timezone);
+    return toNumber ? [{ ...lead, toNumber }] : [];
+  });
 
   const skipped = (leads?.length ?? 0) - eligibleLeads.length;
   const msPerCall = Math.floor(3_600_000 / (campaign.callCadencePerHour || 5));
@@ -405,7 +418,7 @@ async function enqueueVoiceCalls(
   for (let i = 0; i < eligibleLeads.length; i++) {
     const lead = eligibleLeads[i];
     await enqueueScheduleCall(
-      { leadId: lead.id, campaignId, organizationId: orgId, fromNumber, toNumber: lead.phone! },
+      { leadId: lead.id, campaignId, organizationId: orgId, fromNumber, toNumber: lead.toNumber },
       i * msPerCall,
     );
     queued++;
@@ -438,7 +451,7 @@ async function getEmailLaunchReadiness(orgId: string, campaignId: string) {
 
 // Mirrors the eligibility filter in enqueueVoiceCalls, so a 'both' campaign
 // can tell whether the calling side has anything to launch with.
-async function countCallableLeads(orgId: string, campaignId: string) {
+async function countCallableLeads(orgId: string, campaignId: string, timezone: string) {
   const { data: leads, error } = await supabase
     .from('leads')
     .select('id,phone,status')
@@ -449,7 +462,9 @@ async function countCallableLeads(orgId: string, campaignId: string) {
   if (error) throw new AppError(500, 'Failed to inspect campaign call readiness', error);
 
   return (leads ?? []).filter(
-    lead => lead.phone && !STOP_CALLING_STATUSES.includes(lead.status)
+    lead => lead.phone &&
+      !STOP_CALLING_STATUSES.includes(lead.status) &&
+      Boolean(normalizePhoneForCalling(lead.phone, timezone))
   ).length;
 }
 
@@ -562,6 +577,28 @@ async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
 
   console.log(`[campaigns] Initial queue complete for campaign ${campaignId}: ${queued} job(s) queued.`);
   return queued;
+}
+
+// Powers the AI agent's "pause weekend sending" tool - pauses every active
+// campaign that sends email (email or both), reusing the existing
+// setCampaignStatus so pausing goes through the same validation/side effects
+// as pausing from the Campaigns page.
+export async function pauseAllActiveEmailCampaigns(orgId: string) {
+  const { data, error } = await supabase
+    .from('campaigns')
+    .select('id, name, channel')
+    .eq('organization_id', orgId)
+    .eq('status', 'active')
+    .in('channel', ['email', 'both']);
+
+  if (error) throw new AppError(500, 'Failed to fetch active campaigns', error);
+
+  const active = data ?? [];
+  if (active.length === 0) return { paused: 0, names: [] as string[] };
+
+  await Promise.all(active.map(c => setCampaignStatus(orgId, c.id, 'paused')));
+
+  return { paused: active.length, names: active.map(c => c.name) };
 }
 
 export async function deleteCampaign(orgId: string, id: string) {

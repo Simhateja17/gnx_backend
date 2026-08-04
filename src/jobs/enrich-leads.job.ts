@@ -1,5 +1,5 @@
 import { Queue } from 'bullmq';
-import { queueConnection } from '../lib/redis';
+import { queueConnection, silenceQueueErrors } from '../lib/redis';
 
 export interface EnrichLeadsJobData {
   leadIds:        string[];
@@ -8,6 +8,7 @@ export interface EnrichLeadsJobData {
 }
 
 const enrichLeadsQueue = new Queue<EnrichLeadsJobData, any, string>('enrich-leads', { connection: queueConnection });
+silenceQueueErrors(enrichLeadsQueue, 'enrich-leads');
 
 export async function enqueueEnrichLeads(data: EnrichLeadsJobData) {
   return enrichLeadsQueue.add('enrich-leads', data, {

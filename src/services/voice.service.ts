@@ -6,6 +6,9 @@ import { enqueueScheduleCall } from '../jobs/schedule-call.job';
 import { posthog } from '../lib/posthog';
 import { AppError } from '../types';
 import { env } from '../config/env';
+import { isE164Phone, normalizePhoneForCalling } from '../lib/phone';
+import { contextSnapshotToDynamicVariables, createOrReuseLeadContextSnapshot } from './lead-context.service';
+import { bindActiveRetellPhoneNumbers } from './retell-phone.service';
 
 const DEFAULT_VOICE_ID = 'openai-Alloy';
 
@@ -32,23 +35,37 @@ const GENERAL_TOOLS = [
 export async function createOrUpdateRetellAgent(organizationId: string) {
   const { data: agentConfig, error } = await supabase
     .from('agent_configs')
-    .select('retell_agent_id, retell_llm_id, agent_name')
+    .select('retell_agent_id, retell_llm_id, retell_conversation_flow_id, retell_agent_version, agent_name')
     .eq('organization_id', organizationId)
     .single();
 
   if (error || !agentConfig) throw new AppError(404, 'Agent config not found for this organization');
 
-  const { prompt } = await generateVoicePrompt(organizationId, {});
+  const prompt = agentConfig.retell_conversation_flow_id
+    ? null
+    : (await generateVoicePrompt(organizationId, {})).prompt;
 
   if (!agentConfig.retell_agent_id) {
-    // First time setup: create LLM then create agent pointing at it
-    const llm = await retell.llm.create({ general_prompt: prompt, general_tools: GENERAL_TOOLS }).catch((err: any) => {
-      throw new AppError(502, `Failed to create Retell LLM: ${err.message}`);
-    });
+    let responseEngine: any;
+    let llmId: string | null = null;
+    if (agentConfig.retell_conversation_flow_id) {
+      responseEngine = {
+        type: 'conversation-flow',
+        conversation_flow_id: agentConfig.retell_conversation_flow_id,
+        version: agentConfig.retell_agent_version ?? undefined,
+      };
+    } else {
+      // Backward-compatible default while organizations migrate to Flow.
+      const llm = await retell.llm.create({ general_prompt: prompt ?? '', general_tools: GENERAL_TOOLS }).catch((err: any) => {
+        throw new AppError(502, `Failed to create Retell LLM: ${err.message}`);
+      });
+      llmId = llm.llm_id;
+      responseEngine = { type: 'retell-llm', llm_id: llm.llm_id };
+    }
 
     const agent = await retell.agent.create({
       agent_name: agentConfig.agent_name ?? 'Nexo',
-      response_engine: { type: 'retell-llm', llm_id: llm.llm_id },
+      response_engine: responseEngine,
       voice_id: DEFAULT_VOICE_ID,
       post_call_analysis_data: POST_CALL_ANALYSIS_DATA,
     }).catch((err: any) => {
@@ -57,24 +74,39 @@ export async function createOrUpdateRetellAgent(organizationId: string) {
 
     await supabase
       .from('agent_configs')
-      .update({ retell_agent_id: agent.agent_id, retell_llm_id: llm.llm_id })
+      .update({ retell_agent_id: agent.agent_id, retell_llm_id: llmId })
       .eq('organization_id', organizationId);
+
+    await bindActiveRetellPhoneNumbers(organizationId, agent.agent_id);
 
     return { agentId: agent.agent_id };
   }
 
-  // Existing agent: update the LLM prompt
-  const llmId = agentConfig.retell_llm_id ?? await resolveLlmId(agentConfig.retell_agent_id, organizationId);
-
-  await retell.llm.update(llmId, { general_prompt: prompt, general_tools: GENERAL_TOOLS }).catch((err: any) => {
-    throw new AppError(502, `Failed to update Retell LLM: ${err.message}`);
-  });
+  // Existing agent: keep the legacy LLM path working, or attach the selected
+  // Conversation Flow when onboarding has configured one.
+  let responseEngine: any;
+  if (agentConfig.retell_conversation_flow_id) {
+    responseEngine = {
+      type: 'conversation-flow',
+      conversation_flow_id: agentConfig.retell_conversation_flow_id,
+      version: agentConfig.retell_agent_version ?? undefined,
+    };
+  } else {
+    const llmId = agentConfig.retell_llm_id ?? await resolveLlmId(agentConfig.retell_agent_id, organizationId);
+    await retell.llm.update(llmId, { general_prompt: prompt ?? '', general_tools: GENERAL_TOOLS }).catch((err: any) => {
+      throw new AppError(502, `Failed to update Retell LLM: ${err.message}`);
+    });
+    responseEngine = { type: 'retell-llm', llm_id: llmId };
+  }
 
   await retell.agent.update(agentConfig.retell_agent_id, {
     post_call_analysis_data: POST_CALL_ANALYSIS_DATA,
+    response_engine: responseEngine,
   }).catch((err: any) => {
     console.warn(`[voice] Failed to update agent analysis config: ${err.message}`);
   });
+
+  await bindActiveRetellPhoneNumbers(organizationId, agentConfig.retell_agent_id);
 
   return { agentId: agentConfig.retell_agent_id };
 }
@@ -106,9 +138,13 @@ export async function scheduleCall(
   fromNumber: string,
   toNumber: string,
 ) {
+  if (!isE164Phone(fromNumber) || !isE164Phone(toNumber)) {
+    throw new AppError(400, 'Call numbers must use E.164 format, for example +916301658275');
+  }
+
   const { data: agentConfig } = await supabase
     .from('agent_configs')
-    .select('retell_agent_id')
+    .select('*')
     .eq('organization_id', organizationId)
     .single();
 
@@ -118,12 +154,20 @@ export async function scheduleCall(
 
   const { data: lead } = await supabase
     .from('leads')
-    .select('first_name, last_name, title, company, email')
+    .select('id, first_name, last_name, name, title, company, email, account_id, headline, department, job_function, seniority, city, state, country, last_apollo_enriched_at, updated_at, created_at')
     .eq('id', leadId)
     .eq('organization_id', organizationId)
     .single();
 
   if (!lead) throw new AppError(404, 'Lead not found');
+
+  const contextSnapshot = await createOrReuseLeadContextSnapshot(
+    organizationId,
+    leadId,
+    campaignId,
+    'voice',
+    agentConfig,
+  );
 
   const callRecord = await supabase
     .from('calls')
@@ -131,6 +175,7 @@ export async function scheduleCall(
       organization_id: organizationId,
       campaign_id: campaignId,
       lead_id: leadId,
+      context_snapshot_id: contextSnapshot.id,
       from_number: fromNumber,
       to_number: toNumber,
       status: 'queued',
@@ -145,12 +190,7 @@ export async function scheduleCall(
       from_number: fromNumber,
       to_number: toNumber,
       override_agent_id: agentConfig.retell_agent_id,
-      retell_llm_dynamic_variables: {
-        lead_name: [lead.first_name, lead.last_name].filter(Boolean).join(' '),
-        lead_title: lead.title ?? '',
-        lead_company: lead.company ?? '',
-        lead_email: lead.email ?? '',
-      },
+      retell_llm_dynamic_variables: contextSnapshotToDynamicVariables(contextSnapshot, lead),
     });
 
     await supabase
@@ -171,6 +211,79 @@ export async function scheduleCall(
 
     throw new AppError(502, `Retell call failed: ${err.message}`);
   }
+}
+
+export async function callLeadNow(organizationId: string, leadId: string) {
+  const { data: lead, error: leadError } = await supabase
+    .from('leads')
+    .select('id,campaign_id,phone,status,campaigns(id,channel,voice_mode,timezone)')
+    .eq('organization_id', organizationId)
+    .eq('id', leadId)
+    .maybeSingle();
+
+  if (leadError) throw new AppError(500, 'Failed to fetch lead for immediate call', leadError);
+  if (!lead) throw new AppError(404, 'Lead not found');
+  if (!lead.phone) throw new AppError(400, 'Lead has no phone number');
+  if (!lead.campaign_id) throw new AppError(400, 'Lead is not attached to a campaign');
+  if (['meeting_booked', 'not_interested', 'unsubscribed'].includes(lead.status)) {
+    throw new AppError(400, `Lead status is ${lead.status}; calls are stopped for this lead`);
+  }
+
+  const campaign = lead.campaigns as unknown as { channel?: string; voice_mode?: string; timezone?: string } | null;
+  if (campaign?.channel !== 'voice' && campaign?.channel !== 'both') {
+    throw new AppError(400, 'Immediate calling is only available for voice campaigns');
+  }
+  if (campaign.voice_mode !== 'ai') {
+    throw new AppError(400, 'Immediate AI calling is only available for AI voice campaigns');
+  }
+
+  const toNumber = normalizePhoneForCalling(lead.phone, campaign.timezone);
+  if (!toNumber) {
+    throw new AppError(400, 'Lead phone number is invalid. Use E.164 format, for example +916301658275');
+  }
+
+  const { data: activeCall, error: activeCallError } = await supabase
+    .from('calls')
+    .select('id')
+    .eq('organization_id', organizationId)
+    .eq('campaign_id', lead.campaign_id)
+    .eq('lead_id', leadId)
+    .in('status', ['queued', 'in_progress'])
+    .limit(1)
+    .maybeSingle();
+
+  if (activeCallError) throw new AppError(500, 'Failed to check active calls', activeCallError);
+  if (activeCall) throw new AppError(409, 'A call to this lead is already queued or in progress');
+
+  const { data: agentConfig, error: configError } = await supabase
+    .from('agent_configs')
+    .select('retell_phone_number')
+    .eq('organization_id', organizationId)
+    .single();
+
+  const { data: provisionedPhone } = await supabase
+    .from('retell_phone_numbers')
+    .select('phone_number')
+    .eq('organization_id', organizationId)
+    .eq('entitlement_kind', 'included')
+    .eq('status', 'active')
+    .not('phone_number', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const fromNumber = provisionedPhone?.phone_number ?? agentConfig?.retell_phone_number;
+  if (configError || !fromNumber) {
+    throw new AppError(400, 'Add your Retell phone number in Settings before calling this lead');
+  }
+
+  return scheduleCall(
+    organizationId,
+    lead.campaign_id,
+    leadId,
+    fromNumber,
+    toNumber,
+  );
 }
 
 export async function handleRetellWebhook(rawBody: Buffer, signature: string) {

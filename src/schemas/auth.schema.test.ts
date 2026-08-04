@@ -1,88 +1,71 @@
 import { describe, it, expect } from 'vitest';
-import { signupSchema, loginSchema, forgotPasswordSchema, resetPasswordSchema } from './auth.schema';
+import { signupStartSchema, signupVerifySchema, loginStartSchema, loginVerifySchema } from './auth.schema';
 
-describe('signupSchema', () => {
+describe('signupStartSchema', () => {
   const valid = {
     firstName: 'Manasa',
     lastName: 'Test',
     email: 'test@example.com',
     company: 'Acme Inc',
-    password: 'Str0ng!Pass',
   };
 
   it('accepts valid input', () => {
-    expect(signupSchema.safeParse(valid).success).toBe(true);
+    expect(signupStartSchema.safeParse(valid).success).toBe(true);
   });
 
   it('rejects missing firstName', () => {
-    const { success } = signupSchema.safeParse({ ...valid, firstName: undefined });
+    const { success } = signupStartSchema.safeParse({ ...valid, firstName: undefined });
     expect(success).toBe(false);
   });
 
   it('rejects invalid email', () => {
-    const { success } = signupSchema.safeParse({ ...valid, email: 'not-an-email' });
+    const { success } = signupStartSchema.safeParse({ ...valid, email: 'not-an-email' });
     expect(success).toBe(false);
   });
 
-  it('rejects short password', () => {
-    const { success } = signupSchema.safeParse({ ...valid, password: 'Ab1!' });
-    expect(success).toBe(false);
-  });
-
-  it('rejects password without number', () => {
-    const { success } = signupSchema.safeParse({ ...valid, password: 'Abcdefgh!' });
-    expect(success).toBe(false);
-  });
-
-  it('rejects password without symbol', () => {
-    const { success } = signupSchema.safeParse({ ...valid, password: 'Abcdefgh1' });
+  it('rejects missing company', () => {
+    const { success } = signupStartSchema.safeParse({ ...valid, company: undefined });
     expect(success).toBe(false);
   });
 });
 
-describe('loginSchema', () => {
-  it('accepts valid input', () => {
-    const result = loginSchema.safeParse({ email: 'user@test.com', password: 'pass' });
+describe('signupVerifySchema', () => {
+  it('accepts a 6-digit code', () => {
+    const result = signupVerifySchema.safeParse({ email: 'user@test.com', otp: '123456' });
     expect(result.success).toBe(true);
   });
 
-  it('rejects missing email', () => {
-    const result = loginSchema.safeParse({ password: 'pass' });
+  it('rejects a non-numeric code', () => {
+    const result = signupVerifySchema.safeParse({ email: 'user@test.com', otp: 'abcdef' });
     expect(result.success).toBe(false);
   });
 
-  it('rejects missing password', () => {
-    const result = loginSchema.safeParse({ email: 'user@test.com' });
+  it('rejects a short code', () => {
+    const result = signupVerifySchema.safeParse({ email: 'user@test.com', otp: '123' });
     expect(result.success).toBe(false);
   });
 });
 
-describe('forgotPasswordSchema', () => {
+describe('loginStartSchema', () => {
   it('accepts valid email', () => {
-    const result = forgotPasswordSchema.safeParse({ email: 'user@test.com' });
+    const result = loginStartSchema.safeParse({ email: 'user@test.com' });
     expect(result.success).toBe(true);
   });
 
   it('rejects invalid email', () => {
-    const result = forgotPasswordSchema.safeParse({ email: 'invalid' });
+    const result = loginStartSchema.safeParse({ email: 'invalid' });
     expect(result.success).toBe(false);
   });
 });
 
-describe('resetPasswordSchema', () => {
+describe('loginVerifySchema', () => {
   it('accepts valid input', () => {
-    const result = resetPasswordSchema.safeParse({
-      accessToken: 'some-token',
-      newPassword: 'NewP@ss1',
-    });
+    const result = loginVerifySchema.safeParse({ email: 'user@test.com', otp: '654321' });
     expect(result.success).toBe(true);
   });
 
-  it('rejects weak newPassword', () => {
-    const result = resetPasswordSchema.safeParse({
-      accessToken: 'some-token',
-      newPassword: 'weak',
-    });
+  it('rejects a malformed code', () => {
+    const result = loginVerifySchema.safeParse({ email: 'user@test.com', otp: '12' });
     expect(result.success).toBe(false);
   });
 });
