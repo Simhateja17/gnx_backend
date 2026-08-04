@@ -380,11 +380,21 @@ async function enqueueVoiceCalls(
     .eq('organization_id', orgId)
     .single();
 
-  if (!agentConfig?.retell_phone_number) {
+  const { data: provisionedPhone } = await supabase
+    .from('retell_phone_numbers')
+    .select('phone_number')
+    .eq('organization_id', orgId)
+    .eq('entitlement_kind', 'included')
+    .eq('status', 'active')
+    .not('phone_number', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const fromNumber = provisionedPhone?.phone_number ?? agentConfig?.retell_phone_number;
+  if (!fromNumber) {
     throw new AppError(400, 'Add your Retell phone number in Settings before launching a voice campaign');
   }
-
-  const fromNumber = agentConfig.retell_phone_number;
 
   const { data: leads, error: leadsError } = await supabase
     .from('leads')

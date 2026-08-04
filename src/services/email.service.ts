@@ -494,7 +494,7 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
 
       await supabase
         .from('email_messages')
-        .update({ subject, body })
+        .update({ subject, body, context_snapshot_id: generated.contextSnapshotId })
         .eq('id', emailMessageId);
     }
   }

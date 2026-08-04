@@ -9,6 +9,7 @@ import { sendBillingReminderEmail } from '../lib/resend';
 import { posthog } from '../lib/posthog';
 import { env } from '../config/env';
 import { AppError } from '../types';
+import { provisionIncludedRetellPhoneNumber } from './retell-phone.service';
 
 export type PlanId = 'starter' | 'growth' | 'scale';
 export type BillingPeriod = 'monthly' | 'annual';
@@ -236,6 +237,18 @@ async function applySubscriptionEvent(input: SubscriptionEventInput) {
   return { alreadyProcessed: data === false || (Array.isArray(data) && data[0] === false) };
 }
 
+async function provisionPhoneAfterPaidSubscription(organizationId: string) {
+  try {
+    return await provisionIncludedRetellPhoneNumber(organizationId);
+  } catch (error: any) {
+    // Billing must remain successful even if Retell is temporarily unavailable.
+    // The failed provisioning row is retryable on the next paid webhook or from
+    // the future Billing/Voice retry action.
+    console.error(`[billing] Retell included-number provisioning failed for org ${organizationId}:`, error?.message ?? error);
+    return { status: 'failed' as const, reason: error?.message ?? 'Retell provisioning failed' };
+  }
+}
+
 export async function verifyCheckoutSignature(
   organizationId: string,
   payload: { razorpay_subscription_id: string; razorpay_payment_id: string; razorpay_signature: string },
@@ -309,6 +322,10 @@ export async function verifyCheckoutSignature(
     payload: { subscription: providerSubscription, payment },
   });
 
+  const phoneProvisioning = ['active', 'authenticated'].includes(status)
+    ? await provisionPhoneAfterPaidSubscription(organizationId)
+    : { status: 'not_eligible' as const, reason: 'subscription_not_active' };
+
   posthog?.capture({
     distinctId: organizationId,
     event: 'billing_subscription_verified',
@@ -321,6 +338,7 @@ export async function verifyCheckoutSignature(
     planId: resolvedPlan.planId,
     billingPeriod: resolvedPlan.billingPeriod,
     subscriptionStatus: providerStatusToOrganizationStatus(status),
+    phoneProvisioning,
   };
 }
 
@@ -571,6 +589,10 @@ export async function handleRazorpayWebhook(rawBody: Buffer, signature: string) 
       currency,
       payload,
     });
+
+    if (['active', 'authenticated'].includes(providerStatus)) {
+      await provisionPhoneAfterPaidSubscription(localSubscription.organization_id);
+    }
 
     if (event === 'subscription.charged' && !result.alreadyProcessed) {
       posthog?.capture({

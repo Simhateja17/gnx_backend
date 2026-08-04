@@ -16,6 +16,7 @@ const envSchema = z.object({
   GOOGLE_CLIENT_ID: z.string().trim().default(''),
   GOOGLE_CLIENT_SECRET: z.string().trim().default(''),
   GOOGLE_REDIRECT_URI: z.string().default('http://localhost:5000/api/gmail/callback'),
+  GOOGLE_CALENDAR_REDIRECT_URI: z.string().default('http://localhost:5000/api/calendar/callback'),
 
   AZURE_OPENAI_ENDPOINT: z.string().default(''),
   AZURE_OPENAI_API_KEY: z.string().trim().default(''),
@@ -24,8 +25,27 @@ const envSchema = z.object({
 
   RETELL_API_KEY: z.string().trim().default(''),
   RETELL_WEBHOOK_SECRET: z.string().trim().default(''),
+  RETELL_DEFAULT_COUNTRY: z.enum(['US', 'CA']).default('US'),
 
   APOLLO_API_KEY: z.string().trim().default(''),
+  APOLLO_ENRICHMENT_WEBHOOK_URL: z.string().trim().url().optional().or(z.literal('')),
+  APOLLO_ENRICHMENT_WEBHOOK_SECRET: z.string().trim().default(''),
+  APOLLO_REVEAL_PERSONAL_EMAILS: z.preprocess(
+    (value) => typeof value === 'string' ? value.toLowerCase() === 'true' : value,
+    z.boolean().default(false),
+  ),
+  APOLLO_REVEAL_PHONE_NUMBER: z.preprocess(
+    (value) => typeof value === 'string' ? value.toLowerCase() === 'true' : value,
+    z.boolean().default(false),
+  ),
+  APOLLO_RUN_WATERFALL_EMAIL: z.preprocess(
+    (value) => typeof value === 'string' ? value.toLowerCase() === 'true' : value,
+    z.boolean().default(false),
+  ),
+  APOLLO_RUN_WATERFALL_PHONE: z.preprocess(
+    (value) => typeof value === 'string' ? value.toLowerCase() === 'true' : value,
+    z.boolean().default(false),
+  ),
 
   RAZORPAY_KEY_ID: z.string().trim().default(''),
   RAZORPAY_KEY_SECRET: z.string().trim().default(''),

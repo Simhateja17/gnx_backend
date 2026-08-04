@@ -13,7 +13,7 @@ export async function getSettings(userId: string, orgId: string) {
     // agent_configs may not exist yet if onboarding was skipped — return defaults gracefully
     supabase
       .from('agent_configs')
-      .select('tone, auto_approve_replies, daily_email_send_cap, booking_link, retell_phone_number, retell_agent_id')
+      .select('tone, auto_approve_replies, daily_email_send_cap, booking_link, retell_phone_number, retell_phone_country, retell_agent_id')
       .eq('organization_id', orgId)
       .single(),
   ]);
@@ -42,6 +42,7 @@ export async function getSettings(userId: string, orgId: string) {
       dailyEmailSendCap:  config?.daily_email_send_cap ?? 100,
       bookingLink:        config?.booking_link         ?? '',
       retellPhoneNumber:  config?.retell_phone_number  ?? '',
+      retellPhoneCountry: config?.retell_phone_country ?? 'US',
       retellAgentId:      config?.retell_agent_id      ?? null,
     },
   };
