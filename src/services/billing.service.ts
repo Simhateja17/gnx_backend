@@ -74,7 +74,7 @@ function resolvePlan(providerPlanId: string | undefined, fallbackPlanId?: string
   return { planId: 'starter' as PlanId, billingPeriod: 'monthly' as BillingPeriod };
 }
 
-function providerStatusToOrganizationStatus(status: string): string {
+export function providerStatusToOrganizationStatus(status: string): string {
   if (status === 'active' || status === 'authenticated') return 'active';
   if (status === 'pending') return 'past_due';
   if (['halted', 'cancelled', 'completed', 'expired'].includes(status)) return 'restricted';
