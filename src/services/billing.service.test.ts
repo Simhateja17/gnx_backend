@@ -42,6 +42,9 @@ vi.mock('../lib/razorpay', () => ({
 }));
 vi.mock('../lib/resend', () => ({ sendBillingReminderEmail: vi.fn() }));
 vi.mock('../lib/posthog', () => ({ posthog: { capture: vi.fn() } }));
+vi.mock('./retell-phone.service', () => ({
+  provisionIncludedRetellPhoneNumber: vi.fn().mockResolvedValue({ status: 'active', phoneNumber: '+14155550100', country: 'US', numberType: 'local' }),
+}));
 
 import {
   changeSubscription,

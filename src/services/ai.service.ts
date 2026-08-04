@@ -6,6 +6,8 @@ import { withRetry } from '../lib/retry';
 import { ensureAgentConfig } from './agent-config.service';
 import { GenerateEmailInput, GenerateReplyInput, GenerateVoicePromptInput } from '../schemas/ai.schema';
 import { formatPromptContextForPrompt } from '../lib/prompt-context';
+import { createOrReuseLeadContextSnapshot } from './lead-context.service';
+import type { LeadContextSnapshot } from './lead-context.service';
 import { z } from 'zod';
 
 const AI_TIMEOUT_MS = 30_000;
@@ -134,6 +136,11 @@ ${agentConfig.pain_points ? `BUYER PAIN POINTS TO ADDRESS: ${agentConfig.pain_po
 ${agentConfig.booking_link ? `BOOKING LINK: ${agentConfig.booking_link}` : ''}
 ${formatPromptContextForPrompt(campaign.prompt_context)}
 
+RESEARCH SAFETY:
+- Use verified prospect/company facts when available.
+- Treat every item labelled as a hypothesis as a question to validate, never as a claim.
+- Never invent a customer problem, metric, funding event, technology, or relationship.
+
 TONE: ${toneInstruction}`;
 
   const stepInstructions: Record<number, string> = {
@@ -153,13 +160,34 @@ Respond with JSON: { "subject": "...", "body": "..." }
 The body should be plain text (no HTML). Use line breaks for paragraphs.`;
 }
 
-function buildEmailUserPrompt(lead: any, stepNumber: number, previousEmails: any[]): string {
+function formatContextForPrompt(context: LeadContextSnapshot | null): string {
+  if (!context) return '';
+  return `\n\nRESEARCH CONTEXT (use carefully):
+VERIFIED FACTS:
+${context.factual_summary || 'No verified enrichment facts are available.'}
+
+PAIN HYPOTHESES (ask/validate, do not assert):
+${(context.pain_hypotheses || []).map(item => `- ${item.text}`).join('\n') || '- None'}
+
+DISCOVERY QUESTIONS:
+${(context.discovery_questions || []).map(item => `- ${item}`).join('\n')}
+
+SOLUTION ANGLE:
+${context.solution_angle || 'Use the product value proposition only after learning more.'}
+
+DO NOT CLAIM:
+${(context.do_not_claim || []).map(item => `- ${item}`).join('\n')}`;
+}
+
+function buildEmailUserPrompt(lead: any, stepNumber: number, previousEmails: any[], context: LeadContextSnapshot | null = null): string {
   let prompt = `PROSPECT:
 - Name: ${lead.first_name || ''} ${lead.last_name || ''}
 - Title: ${lead.title || 'Unknown'}
 - Company: ${lead.company || 'Unknown'}
 ${lead.location ? `- Location: ${lead.location}` : ''}
 ${lead.linkedin_url ? `- LinkedIn: ${lead.linkedin_url}` : ''}`;
+
+  prompt += formatContextForPrompt(context);
 
   if (stepNumber > 1 && previousEmails.length > 0) {
     prompt += '\n\nPREVIOUS EMAILS IN SEQUENCE:';
@@ -184,6 +212,14 @@ export async function generateEmail(orgId: string, input: GenerateEmailInput) {
   const campaign = campaignResult.data;
   const lead = leadResult.data;
 
+  const contextSnapshot = await createOrReuseLeadContextSnapshot(
+    orgId,
+    input.leadId,
+    input.campaignId,
+    'email',
+    agentConfig,
+  );
+
   const [previousEmailsResult, sequenceStepResult] = await Promise.all([
     input.stepNumber > 1
       ? supabase
@@ -205,7 +241,7 @@ export async function generateEmail(orgId: string, input: GenerateEmailInput) {
   const stepContext = sequenceStepResult.data?.body_prompt_context || null;
 
   const systemPrompt = sanitizeText(buildEmailSystemPrompt(agentConfig, campaign, agentConfig.tone, input.stepNumber, stepContext));
-  const userPrompt = sanitizeText(buildEmailUserPrompt(lead, input.stepNumber, previousEmails));
+  const userPrompt = sanitizeText(buildEmailUserPrompt(lead, input.stepNumber, previousEmails, contextSnapshot));
 
   const raw = await withRetry(async () => {
     const timeout = createTimeout();
@@ -229,7 +265,10 @@ export async function generateEmail(orgId: string, input: GenerateEmailInput) {
     }
   }, { label: 'generate-email' });
 
-  return parseJsonSafe(raw, emailOutputSchema, 'email');
+  return {
+    ...parseJsonSafe(raw, emailOutputSchema, 'email'),
+    contextSnapshotId: contextSnapshot.id,
+  };
 }
 
 // ── Reply generation ─────────────────────────────────────────────
@@ -248,6 +287,11 @@ VALUE PROPOSITION: ${agentConfig.value_proposition}
 ${agentConfig.pain_points ? `BUYER PAIN POINTS TO ADDRESS: ${agentConfig.pain_points}` : ''}
 ${agentConfig.booking_link ? `BOOKING LINK: ${agentConfig.booking_link}` : ''}
 
+RESEARCH SAFETY:
+- Use verified facts as context, not as proof of a current pain.
+- Treat hypotheses as questions to validate.
+- Never invent company metrics, initiatives, or customer statements.
+
 TONE: ${toneInstruction}
 ${historyNote}
 RULES:
@@ -265,6 +309,7 @@ The body should be plain text (no HTML). Use line breaks for paragraphs.`;
 function buildReplyUserPrompt(
   thread: { outbound: any[]; reply: any },
   lead: { first_name?: string; last_name?: string; title?: string; company?: string } | null,
+  context: LeadContextSnapshot | null = null,
 ): string {
   let prompt = '';
 
@@ -274,6 +319,8 @@ function buildReplyUserPrompt(
 - Title: ${lead.title || 'Unknown'}
 - Company: ${lead.company || 'Unknown'}\n\n`;
   }
+
+  prompt += formatContextForPrompt(context);
 
   if (thread.outbound.length > 0) {
     prompt += 'CONVERSATION HISTORY:\n';
@@ -309,6 +356,10 @@ export async function generateReply(orgId: string, input: GenerateReplyInput) {
   let outbound: any[] = [];
   const campaignId = emailReply.email_messages?.campaign_id;
 
+  const contextSnapshot = campaignId
+    ? await createOrReuseLeadContextSnapshot(orgId, emailReply.lead_id, campaignId, 'email', agentConfig)
+    : null;
+
   if (campaignId) {
     const { data: threadMessages } = await supabase
       .from('email_messages')
@@ -330,7 +381,7 @@ export async function generateReply(orgId: string, input: GenerateReplyInput) {
   const hasHistory = outbound.length > 0;
 
   const systemPrompt = sanitizeText(buildReplySystemPrompt(agentConfig, hasHistory));
-  const userPrompt = sanitizeText(buildReplyUserPrompt(thread, lead));
+  const userPrompt = sanitizeText(buildReplyUserPrompt(thread, lead, contextSnapshot));
 
   const raw = await withRetry(async () => {
     const timeout = createTimeout();
@@ -409,6 +460,19 @@ VARIABLES AVAILABLE AT CALL TIME:
 - {{lead_title}} - prospect's job title
 - {{lead_company}} - prospect's company name
 - {{lead_email}} - prospect's email address
+- {{lead_factual_summary}} - verified facts from the current context snapshot
+- {{lead_verified_facts}} - JSON list of verified facts
+- {{lead_company_facts}} - JSON object of company facts
+- {{lead_pain_hypotheses}} - hypotheses that must be validated, not asserted
+- {{lead_discovery_questions}} - suggested discovery questions
+- {{lead_solution_angle}} - product-specific angle to explore
+- {{lead_do_not_claim}} - claims the agent must avoid
+- {{customer_context_version}} - source freshness marker
+
+RESEARCH RULES:
+1. Use the verified context variables to make the opening relevant.
+2. Treat pain hypotheses as questions; never say them as if the prospect confirmed them.
+3. If a fact is missing or uncertain, ask rather than inventing it.
 
 Keep responses concise and conversational. Do not monologue.`;
 

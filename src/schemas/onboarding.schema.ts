@@ -20,6 +20,7 @@ export const onboardingPostSchema = z.object({
   dealSize: z.string().optional().default(''),
   salesCycle: z.string().optional().default(''),
   agentName: z.string().min(1).max(40).default('Nexo'),
+  phoneCountry: z.enum(['US', 'CA']).default('US'),
   bookingLink: z.string().url('Must be a valid URL').optional().or(z.literal('')).optional(),
   tools: z.array(z.string()).optional().default([]),
 });

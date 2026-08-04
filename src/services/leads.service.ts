@@ -1,4 +1,3 @@
-import { env } from '../config/env';
 import { supabase } from '../lib/supabase';
 import { redis } from '../lib/redis';
 import { AppError } from '../types';
@@ -6,8 +5,22 @@ import { mapRow } from '../lib/csv-parser';
 import { sendEmail } from './email.service';
 import { enqueueInitialEmailStepIfActive } from './campaigns.service';
 import { APOLLO_ENRICHMENT_CAP } from '../config/constants';
+import { matchApolloPerson, searchApolloPeople } from '../lib/apollo';
+import {
+  apolloWebhookExpected,
+  buildApolloPersonMatchRequest,
+  completeApolloEnrichmentRun,
+  enrichOrganizationForPerson,
+  failApolloEnrichmentRun,
+  hashApolloPayload,
+  mapApolloPerson,
+  persistApolloPersonToLead,
+  startApolloEnrichmentRun,
+  upsertApolloAccount,
+} from './apollo-data.service';
 import type { ApolloEnrichInput, ApolloSearchInput, CsvUploadInput, LeadCreateInput } from '../schemas/leads.schema';
 import type { CsvImportJobData, CsvImportProgress } from '../jobs/csv-import.job';
+import type { ApolloPerson } from './apollo-data.service';
 
 type LeadRow = {
   id: string;
@@ -28,26 +41,27 @@ type LeadRow = {
   score: number | null;
   status: string;
   raw_data: Record<string, unknown> | null;
+  account_id?: string | null;
+  apollo_contact_id?: string | null;
+  headline?: string | null;
+  department?: string | null;
+  job_function?: string | null;
+  seniority?: string | null;
+  city?: string | null;
+  state?: string | null;
+  country?: string | null;
+  email_status?: string | null;
+  email_confidence?: number | null;
+  phone_numbers?: Array<Record<string, unknown>> | null;
+  employment_history?: Array<Record<string, unknown>> | null;
+  dnc_status?: string | null;
+  email_unsubscribed?: boolean;
+  do_not_email?: boolean;
+  do_not_call?: boolean;
+  last_apollo_enriched_at?: string | null;
+  context_refreshed_at?: string | null;
   created_at: string;
   updated_at: string;
-};
-
-type ApolloPerson = {
-  id?: string;
-  first_name?: string;
-  last_name?: string;
-  name?: string;
-  title?: string;
-  headline?: string;
-  email?: string;
-  phone_numbers?: Array<{ raw_number?: string; sanitized_number?: string }>;
-  organization?: { name?: string };
-  employment_history?: Array<{ organization_name?: string; current?: boolean }>;
-  city?: string;
-  state?: string;
-  country?: string;
-  linkedin_url?: string;
-  photo_url?: string;
 };
 
 const STOP_SEQUENCE_STATUSES = ['engaged', 'meeting_booked', 'not_interested', 'unsubscribed'];
@@ -71,6 +85,25 @@ const LEAD_COLUMNS = [
   'score',
   'status',
   'raw_data',
+  'account_id',
+  'apollo_contact_id',
+  'headline',
+  'department',
+  'job_function',
+  'seniority',
+  'city',
+  'state',
+  'country',
+  'email_status',
+  'email_confidence',
+  'phone_numbers',
+  'employment_history',
+  'dnc_status',
+  'email_unsubscribed',
+  'do_not_email',
+  'do_not_call',
+  'last_apollo_enriched_at',
+  'context_refreshed_at',
   'created_at',
   'updated_at',
 ].join(',');
@@ -99,6 +132,25 @@ function toApiLead(row: LeadRow) {
     status: row.status,
     createdAt: row.created_at,
     rawData: row.raw_data,
+    accountId: row.account_id ?? null,
+    apolloContactId: row.apollo_contact_id ?? null,
+    headline: row.headline ?? null,
+    department: row.department ?? null,
+    jobFunction: row.job_function ?? null,
+    seniority: row.seniority ?? null,
+    city: row.city ?? null,
+    state: row.state ?? null,
+    country: row.country ?? null,
+    emailStatus: row.email_status ?? null,
+    emailConfidence: row.email_confidence ?? null,
+    phoneNumbers: row.phone_numbers ?? [],
+    employmentHistory: row.employment_history ?? [],
+    dncStatus: row.dnc_status ?? null,
+    emailUnsubscribed: row.email_unsubscribed ?? false,
+    doNotEmail: row.do_not_email ?? false,
+    doNotCall: row.do_not_call ?? false,
+    lastApolloEnrichedAt: row.last_apollo_enriched_at ?? null,
+    contextRefreshedAt: row.context_refreshed_at ?? null,
   };
 }
 
@@ -124,30 +176,6 @@ function toLeadRecord(orgId: string, input: LeadCreateInput, rawData?: Record<st
     status: 'new',
     raw_data: rawData ?? null,
     updated_at: new Date().toISOString(),
-  };
-}
-
-function mapApolloPerson(person: ApolloPerson) {
-  const company =
-    person.organization?.name ??
-    person.employment_history?.find(item => item.current)?.organization_name ??
-    person.employment_history?.[0]?.organization_name ??
-    '';
-  const phone = person.phone_numbers?.[0]?.sanitized_number ?? person.phone_numbers?.[0]?.raw_number ?? '';
-  const location = [person.city, person.state, person.country].filter(Boolean).join(', ');
-
-  return {
-    apolloId: person.id ?? '',
-    firstName: person.first_name ?? '',
-    lastName: person.last_name ?? '',
-    name: person.name ?? [person.first_name, person.last_name].filter(Boolean).join(' '),
-    title: person.title ?? person.headline ?? '',
-    company,
-    email: person.email ?? '',
-    phone,
-    location,
-    linkedinUrl: person.linkedin_url ?? '',
-    photoUrl: person.photo_url ?? '',
   };
 }
 
@@ -180,9 +208,17 @@ export async function createLead(orgId: string, input: LeadCreateInput) {
 }
 
 async function saveApolloPeople(orgId: string, input: ApolloSearchInput, people: ApolloPerson[]) {
-  const mappedPeople = people.map(mapApolloPerson);
-  const apolloIds = mappedPeople.map(lead => clean(lead.apolloId)).filter(Boolean) as string[];
-  const emails = mappedPeople.map(lead => clean(lead.email)).filter(Boolean) as string[];
+  const mappedPeople = await Promise.all(people.map(async person => {
+    let accountId: string | null = null;
+    try {
+      accountId = await upsertApolloAccount(orgId, person.organization);
+    } catch (error) {
+      console.warn('[apollo-search] failed to persist embedded organization:', error instanceof Error ? error.message : error);
+    }
+    return { person, mapped: mapApolloPerson(person), accountId };
+  }));
+  const apolloIds = mappedPeople.map(({ mapped }) => clean(mapped.apolloId)).filter(Boolean) as string[];
+  const emails = mappedPeople.map(({ mapped }) => clean(mapped.email)).filter(Boolean) as string[];
   const existingApolloIds = new Set<string>();
   const existingEmails = new Set<string>();
 
@@ -212,31 +248,52 @@ async function saveApolloPeople(orgId: string, input: ApolloSearchInput, people:
     }
   }
 
-  const records = mappedPeople
-    .map((lead, index) => ({ lead, raw: people[index] as unknown as Record<string, unknown> }))
-    .filter(({ lead }) => {
-      const apolloId = clean(lead.apolloId);
-      const email = clean(lead.email);
-      return (!apolloId || !existingApolloIds.has(apolloId)) && (!email || !existingEmails.has(email));
-    })
-    .map(({ lead, raw }) => toLeadRecord(
-      orgId,
-      {
-        campaignId: input.campaignId,
-        source: 'apollo',
-        apolloId: lead.apolloId,
-        firstName: lead.firstName,
-        lastName: lead.lastName,
-        name: lead.name,
-        title: lead.title,
-        company: lead.company,
-        email: lead.email,
-        phone: lead.phone,
-        location: lead.location,
-        linkedinUrl: lead.linkedinUrl,
-      },
-      raw,
-    ));
+  const records = [] as Array<Record<string, unknown>>;
+  for (const { person, mapped, accountId } of mappedPeople) {
+    const apolloId = clean(mapped.apolloId);
+    const email = clean(mapped.email);
+    if ((apolloId && existingApolloIds.has(apolloId)) || (email && existingEmails.has(email))) continue;
+    if (apolloId) existingApolloIds.add(apolloId);
+    if (email) existingEmails.add(email);
+
+    records.push({
+      ...toLeadRecord(
+        orgId,
+        {
+          campaignId: input.campaignId,
+          source: 'apollo',
+          apolloId: mapped.apolloId,
+          firstName: mapped.firstName,
+          lastName: mapped.lastName,
+          name: mapped.name,
+          title: mapped.title,
+          company: mapped.company,
+          email: mapped.email,
+          phone: mapped.phone,
+          location: mapped.location,
+          linkedinUrl: mapped.linkedinUrl,
+        },
+        person,
+      ),
+      account_id: accountId,
+      apollo_contact_id: mapped.contactId || null,
+      headline: mapped.headline || null,
+      department: mapped.department || null,
+      job_function: mapped.jobFunction || null,
+      seniority: mapped.seniority || null,
+      city: mapped.city || null,
+      state: mapped.state || null,
+      country: mapped.country || null,
+      email_status: mapped.emailStatus || null,
+      email_confidence: mapped.emailConfidence,
+      phone_numbers: mapped.phoneNumbers,
+      employment_history: mapped.employmentHistory,
+      dnc_status: mapped.dncStatus || null,
+      email_unsubscribed: mapped.emailUnsubscribed,
+      do_not_email: mapped.emailUnsubscribed,
+      do_not_call: ['dnc', 'do_not_call', 'do-not-call'].includes(mapped.dncStatus.toLowerCase()),
+    });
+  }
 
   if (records.length === 0) return { saved: [], inserted: 0, skipped: mappedPeople.length };
 
@@ -269,39 +326,45 @@ export async function searchApollo(orgId: string, input: ApolloSearchInput) {
   if (input.companySizes.length > 0) body.organization_num_employees_ranges = input.companySizes;
   if (input.keywords) body.q_keywords = input.keywords;
 
-  const response = await fetch('https://api.apollo.io/api/v1/mixed_people/api_search', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'no-cache',
-      'x-api-key': env.APOLLO_API_KEY,
-    },
-    body: JSON.stringify(body),
+  const run = await startApolloEnrichmentRun({
+    organizationId: orgId,
+    enrichmentKind: 'people_search',
+    idempotencyKey: `people_search:${hashApolloPayload(body)}`,
   });
 
-  if (!response.ok) {
-    const details = await response.text();
-    throw new AppError(502, `Apollo search failed (${response.status})`, details.slice(0, 1000));
-  }
-
-  const data = await response.json() as {
+  try {
+    const data = await searchApolloPeople(body) as {
     people?: ApolloPerson[];
     contacts?: ApolloPerson[];
     pagination?: { page?: number; per_page?: number; total_entries?: number; total_pages?: number };
-  };
-  const people = data.people ?? data.contacts ?? [];
-  const saved = await saveApolloPeople(orgId, input, people);
+    };
+    const people = data.people ?? data.contacts ?? [];
+    const saved = await saveApolloPeople(orgId, input, people);
+    await completeApolloEnrichmentRun(orgId, run.id, {
+      providerStatus: 'completed',
+      creditCost: 0,
+      rawPayload: data,
+    });
 
-  return {
-    items: saved.saved.length > 0 ? saved.saved : people.map(mapApolloPerson),
-    inserted: saved.inserted,
-    skipped: saved.skipped,
-    pagination: data.pagination ?? {
-      page: input.page,
-      perPage: input.perPage,
-      totalEntries: people.length,
-    },
-  };
+    return {
+      items: saved.saved.length > 0 ? saved.saved : people.map(mapApolloPerson),
+      inserted: saved.inserted,
+      skipped: saved.skipped,
+      pagination: data.pagination ?? {
+        page: input.page,
+        perPage: input.perPage,
+        totalEntries: people.length,
+      },
+    };
+  } catch (error) {
+    await failApolloEnrichmentRun(
+      orgId,
+      run.id,
+      error instanceof AppError ? `apollo_${error.status}` : 'apollo_search_failed',
+      error instanceof Error ? error.message : 'Apollo search failed',
+    );
+    throw error;
+  }
 }
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -402,7 +465,7 @@ export async function checkApolloEnrichmentCap(orgId: string, campaignId: string
     .from('leads')
     .select('id', { count: 'exact', head: true })
     .eq('organization_id', orgId)
-    .not('raw_data', 'is', null);
+    .not('last_apollo_enriched_at', 'is', null);
   query = campaignId ? query.eq('campaign_id', campaignId) : query.is('campaign_id', null);
 
   const { count, error } = await query;
@@ -426,77 +489,69 @@ export async function enrichLead(orgId: string, input: ApolloEnrichInput) {
   const row = lead as unknown as LeadRow;
   await checkApolloEnrichmentCap(orgId, row.campaign_id);
 
-  const enrichBody: Record<string, unknown> = {};
-
-  if (row.apollo_id) {
-    enrichBody.id = row.apollo_id;
-  } else if (row.email) {
-    enrichBody.email = row.email;
-  } else {
-    const parts: Record<string, unknown> = {};
-    if (row.first_name) parts.first_name = row.first_name;
-    if (row.last_name) parts.last_name = row.last_name;
-    if (row.company) parts.organization_name = row.company;
-    if (Object.keys(parts).length === 0) {
-      throw new AppError(400, 'Lead has no identifiers for enrichment (need email, apollo_id, or name+company)');
-    }
-    Object.assign(enrichBody, parts);
+  const enrichBody = buildApolloPersonMatchRequest({
+    apolloId: row.apollo_id,
+    email: row.email,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    name: row.name,
+    company: row.company,
+    linkedinUrl: row.linkedin_url,
+  });
+  if (Object.keys(enrichBody).filter(key => !['reveal_personal_emails', 'reveal_phone_number', 'run_waterfall_email', 'run_waterfall_phone', 'webhook_url'].includes(key)).length === 0) {
+    throw new AppError(400, 'Lead has no identifiers for enrichment (need email, apollo_id, or name+company)');
   }
 
-  const response = await fetch('https://api.apollo.io/api/v1/people/match', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'no-cache',
-      'x-api-key': env.APOLLO_API_KEY,
-    },
-    body: JSON.stringify(enrichBody),
+  const run = await startApolloEnrichmentRun({
+    organizationId: orgId,
+    leadId: input.leadId,
+    accountId: row.account_id,
+    enrichmentKind: 'person_match',
+    idempotencyKey: `person_match:${input.leadId}:${hashApolloPayload(enrichBody)}`,
+    webhookExpected: apolloWebhookExpected(),
   });
 
-  if (!response.ok) {
-    const details = await response.text();
-    throw new AppError(502, `Apollo enrich failed (${response.status})`, details.slice(0, 1000));
+  try {
+    const result = await matchApolloPerson(enrichBody) as {
+      person?: ApolloPerson;
+      request_id?: string;
+      waterfall?: Record<string, unknown>;
+    };
+    const person = result.person;
+
+    if (!person) {
+      await failApolloEnrichmentRun(orgId, run.id, 'no_match', 'No enrichment data found for this lead', result);
+      await supabase
+        .from('leads')
+        .update({ status: 'enrichment_failed', updated_at: new Date().toISOString() })
+        .eq('id', input.leadId)
+        .eq('organization_id', orgId);
+      throw new AppError(404, 'No enrichment data found for this lead');
+    }
+
+    const organization = await enrichOrganizationForPerson(person);
+    const persisted = await persistApolloPersonToLead(orgId, input.leadId, person, organization);
+    await completeApolloEnrichmentRun(orgId, run.id, {
+      providerRequestId: result.request_id == null ? null : String(result.request_id),
+      providerStatus: result.waterfall?.status ? String(result.waterfall.status) : 'completed',
+      status: apolloWebhookExpected() ? 'awaiting_webhook' : 'completed',
+      accountId: persisted.accountId,
+      rawPayload: { person: result, organization },
+      webhookExpected: apolloWebhookExpected(),
+    });
+
+    return toApiLead(persisted.lead as unknown as LeadRow);
+  } catch (error) {
+    if (!(error instanceof AppError && error.status === 404)) {
+      await failApolloEnrichmentRun(
+        orgId,
+        run.id,
+        error instanceof AppError ? `apollo_${error.status}` : 'apollo_person_match_failed',
+        error instanceof Error ? error.message : 'Apollo person enrichment failed',
+      );
+    }
+    throw error;
   }
-
-  const result = await response.json() as { person?: ApolloPerson };
-  const person = result.person;
-
-  if (!person) {
-    await supabase
-      .from('leads')
-      .update({ status: 'enrichment_failed', updated_at: new Date().toISOString() })
-      .eq('id', input.leadId)
-      .eq('organization_id', orgId);
-    throw new AppError(404, 'No enrichment data found for this lead');
-  }
-
-  const mapped = mapApolloPerson(person);
-  const updates: Record<string, unknown> = {
-    apollo_id: person.id ?? row.apollo_id,
-    first_name: mapped.firstName || row.first_name,
-    last_name: mapped.lastName || row.last_name,
-    name: mapped.name || row.name,
-    title: mapped.title || row.title,
-    company: mapped.company || row.company,
-    email: mapped.email || row.email,
-    phone: mapped.phone || row.phone,
-    location: mapped.location || row.location,
-    linkedin_url: mapped.linkedinUrl || row.linkedin_url,
-    raw_data: person,
-    status: 'new',
-    updated_at: new Date().toISOString(),
-  };
-
-  const { data: updated, error: updateError } = await supabase
-    .from('leads')
-    .update(updates)
-    .eq('id', input.leadId)
-    .eq('organization_id', orgId)
-    .select(LEAD_COLUMNS)
-    .single();
-
-  if (updateError) throw new AppError(500, 'Failed to save enriched lead', updateError);
-  return toApiLead(updated as unknown as LeadRow);
 }
 
 export async function sendLeadNow(orgId: string, id: string) {
@@ -622,7 +677,7 @@ export async function enrichLeads(
 
   const { data: leads, error } = await supabase
     .from('leads')
-    .select('id, email, first_name, last_name, company')
+    .select('id, email, first_name, last_name, name, company, apollo_id, linkedin_url, account_id')
     .eq('organization_id', organizationId)
     .in('id', leadIds);
 
@@ -632,46 +687,51 @@ export async function enrichLeads(
   let enriched = 0;
 
   for (const lead of leads) {
-    if (!lead.email) continue;
+    if (!lead.email && !lead.apollo_id && !lead.name && !(lead.first_name || lead.last_name)) continue;
+
+    let run: { id: string } | null = null;
 
     try {
-      const response = await fetch('https://api.apollo.io/api/v1/people/match', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': env.APOLLO_API_KEY,
-        },
-        body: JSON.stringify({
-          email: lead.email,
-          first_name: lead.first_name ?? undefined,
-          last_name: lead.last_name ?? undefined,
-          organization_name: lead.company ?? undefined,
-        }),
+      await checkApolloEnrichmentCap(organizationId, campaignId || null);
+      const enrichBody = buildApolloPersonMatchRequest({
+        apolloId: lead.apollo_id,
+        email: lead.email,
+        firstName: lead.first_name,
+        lastName: lead.last_name,
+        name: lead.name,
+        company: lead.company,
+        linkedinUrl: lead.linkedin_url,
+      });
+      run = await startApolloEnrichmentRun({
+        organizationId,
+        leadId: lead.id,
+        accountId: lead.account_id,
+        enrichmentKind: 'person_match',
+        idempotencyKey: `person_match:${lead.id}:${hashApolloPayload(enrichBody)}`,
+        webhookExpected: apolloWebhookExpected(),
       });
 
-      if (!response.ok) {
-        console.warn(`[enrich-leads] Apollo match failed for lead ${lead.id}: ${response.status}`);
+      const data = await matchApolloPerson(enrichBody) as { person?: ApolloPerson; request_id?: string };
+      const person = data.person;
+      if (!person) {
+        if (run) await failApolloEnrichmentRun(organizationId, run.id, 'no_match', 'No enrichment data found', data);
         continue;
       }
 
-      const data = await response.json() as { person?: any };
-      const person = data.person;
-      if (!person) continue;
-
-      const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
-      if (person.title && !lead.first_name) patch.title = person.title;
-      if (person.linkedin_url) patch.linkedin_url = person.linkedin_url;
-      if (person.phone_numbers?.[0]?.sanitized_number) patch.phone = person.phone_numbers[0].sanitized_number;
-      if (person.city || person.state || person.country) {
-        patch.location = [person.city, person.state, person.country].filter(Boolean).join(', ');
+      const persisted = await persistApolloPersonToLead(organizationId, lead.id, person, person.organization);
+      if (run) {
+        await completeApolloEnrichmentRun(organizationId, run.id, {
+          providerRequestId: data.request_id == null ? null : String(data.request_id),
+          status: apolloWebhookExpected() ? 'awaiting_webhook' : 'completed',
+          accountId: persisted.accountId,
+          rawPayload: data,
+          webhookExpected: apolloWebhookExpected(),
+        });
       }
-      if (person.organization?.name && !lead.company) patch.company = person.organization.name;
-      patch.raw_data = person;
-
-      await supabase.from('leads').update(patch).eq('id', lead.id);
       enriched++;
     } catch (err: any) {
       console.error(`[enrich-leads] Error enriching lead ${lead.id}:`, err.message);
+      if (run) await failApolloEnrichmentRun(organizationId, run.id, 'worker_error', err.message ?? 'Apollo enrichment failed');
       await supabase
         .from('leads')
         .update({ status: 'enrichment_failed', updated_at: new Date().toISOString() })

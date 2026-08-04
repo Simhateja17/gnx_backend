@@ -9,7 +9,7 @@ export async function submitOnboarding(orgId: string, data: Partial<OnboardingIn
     .eq('organization_id', orgId)
     .maybeSingle();
 
-  const record = {
+  const record: Record<string, unknown> = {
     agent_name: data.agentName ?? 'Nexo',
     first_name: data.firstName ?? '',
     last_name: data.lastName ?? '',
@@ -33,6 +33,10 @@ export async function submitOnboarding(orgId: string, data: Partial<OnboardingIn
     tools: data.tools ?? [],
     updated_at: new Date().toISOString(),
   };
+
+  if (data.phoneCountry !== undefined) {
+    record.retell_phone_country = data.phoneCountry;
+  }
 
   if (existing) {
     const { error } = await supabase
