@@ -222,37 +222,75 @@ async function saveApolloPeople(orgId: string, input: ApolloSearchInput, people:
   const emails = mappedPeople.map(({ mapped }) => clean(mapped.email)).filter(Boolean) as string[];
   const existingApolloIds = new Set<string>();
   const existingEmails = new Set<string>();
+  const existingByApolloId = new Map<string, { id: string; campaign_id: string | null }>();
+  const existingByEmail = new Map<string, { id: string; campaign_id: string | null }>();
 
   if (apolloIds.length > 0) {
     const { data, error } = await supabase
       .from('leads')
-      .select('apollo_id')
+      .select('id,apollo_id,email,campaign_id')
       .eq('organization_id', orgId)
       .in('apollo_id', apolloIds);
 
     if (error) throw new AppError(500, 'Failed to check existing Apollo leads', error);
     for (const row of data ?? []) {
-      if (row.apollo_id) existingApolloIds.add(row.apollo_id);
+      if (row.apollo_id) {
+        existingApolloIds.add(row.apollo_id);
+        existingByApolloId.set(row.apollo_id, { id: row.id, campaign_id: row.campaign_id });
+      }
+      if (row.email) {
+        existingEmails.add(row.email);
+        existingByEmail.set(row.email, { id: row.id, campaign_id: row.campaign_id });
+      }
     }
   }
 
   if (emails.length > 0) {
     const { data, error } = await supabase
       .from('leads')
-      .select('email')
+      .select('id,apollo_id,email,campaign_id')
       .eq('organization_id', orgId)
       .in('email', emails);
 
     if (error) throw new AppError(500, 'Failed to check existing Apollo leads', error);
     for (const row of data ?? []) {
-      if (row.email) existingEmails.add(row.email);
+      if (row.email) {
+        existingEmails.add(row.email);
+        existingByEmail.set(row.email, { id: row.id, campaign_id: row.campaign_id });
+      }
+      if (row.apollo_id) {
+        existingApolloIds.add(row.apollo_id);
+        existingByApolloId.set(row.apollo_id, { id: row.id, campaign_id: row.campaign_id });
+      }
     }
   }
 
   const records = [] as Array<Record<string, unknown>>;
+  const reusedIds = new Set<string>();
   for (const { person, mapped, accountId } of mappedPeople) {
     const apolloId = clean(mapped.apolloId);
     const email = clean(mapped.email);
+    const existing = (apolloId ? existingByApolloId.get(apolloId) : undefined)
+      ?? (email ? existingByEmail.get(email) : undefined);
+
+    if (existing) {
+      // A lead is organization-scoped, but a new campaign still needs to be
+      // able to use an existing lead that is unassigned or already attached
+      // to this campaign. Never steal a lead from a different campaign.
+      if (input.campaignId && (!existing.campaign_id || existing.campaign_id === input.campaignId)) {
+        if (!existing.campaign_id) {
+          const { error } = await supabase
+            .from('leads')
+            .update({ campaign_id: input.campaignId, updated_at: new Date().toISOString() })
+            .eq('organization_id', orgId)
+            .eq('id', existing.id);
+          if (error) throw new AppError(500, 'Failed to attach an existing Apollo lead to the campaign', error);
+        }
+        reusedIds.add(existing.id);
+      }
+      continue;
+    }
+
     if ((apolloId && existingApolloIds.has(apolloId)) || (email && existingEmails.has(email))) continue;
     if (apolloId) existingApolloIds.add(apolloId);
     if (email) existingEmails.add(email);
@@ -296,7 +334,15 @@ async function saveApolloPeople(orgId: string, input: ApolloSearchInput, people:
     });
   }
 
-  if (records.length === 0) return { saved: [], inserted: 0, skipped: mappedPeople.length };
+  if (records.length === 0) {
+    return {
+      saved: [],
+      inserted: 0,
+      skipped: mappedPeople.length - reusedIds.size,
+      reused: reusedIds.size,
+      candidateIds: [...reusedIds],
+    };
+  }
 
   const { data, error } = await supabase
     .from('leads')
@@ -312,7 +358,12 @@ async function saveApolloPeople(orgId: string, input: ApolloSearchInput, people:
   return {
     saved: ((data ?? []) as unknown as LeadRow[]).map(toApiLead),
     inserted: data?.length ?? 0,
-    skipped: mappedPeople.length - (data?.length ?? 0),
+    skipped: mappedPeople.length - (data?.length ?? 0) - reusedIds.size,
+    reused: reusedIds.size,
+    candidateIds: [
+      ...((data ?? []) as unknown as Array<{ id: string }>).map(row => row.id),
+      ...reusedIds,
+    ],
   };
 }
 
@@ -351,6 +402,9 @@ export async function searchApollo(orgId: string, input: ApolloSearchInput) {
       items: saved.saved.length > 0 ? saved.saved : people.map(mapApolloPerson),
       inserted: saved.inserted,
       skipped: saved.skipped,
+      reused: saved.reused,
+      candidateIds: saved.candidateIds,
+      matchesReturned: people.length,
       pagination: data.pagination ?? {
         page: input.page,
         perPage: input.perPage,
@@ -407,6 +461,8 @@ export async function searchApolloForIcp(orgId: string, criteria: IcpSearchCrite
 
   let totalInserted = 0;
   let totalSkipped = 0;
+  let totalReused = 0;
+  let totalMatchesReturned = 0;
   let attemptsUsed = 0;
   let exhausted = false;
   const savedLeads: Awaited<ReturnType<typeof saveApolloPeople>>['saved'] = [];
@@ -426,11 +482,13 @@ export async function searchApolloForIcp(orgId: string, criteria: IcpSearchCrite
 
     totalInserted += result.inserted;
     totalSkipped += result.skipped;
+    totalReused += result.reused;
+    totalMatchesReturned += result.matchesReturned;
     if (Array.isArray((result.items as any))) {
       savedLeads.push(...(result.items as any));
     }
 
-    const pageReturnedNothing = (result.inserted + result.skipped) === 0;
+    const pageReturnedNothing = result.matchesReturned === 0;
     if (pageReturnedNothing) {
       exhausted = true;
       break;
@@ -440,7 +498,9 @@ export async function searchApolloForIcp(orgId: string, criteria: IcpSearchCrite
   return {
     requested,
     inserted: totalInserted,
+    reused: totalReused,
     skippedDuplicates: totalSkipped,
+    matchesReturned: totalMatchesReturned,
     attemptsUsed,
     exhausted,
     items: savedLeads.slice(0, requested),
@@ -811,6 +871,11 @@ export async function enrichLeads(
       const person = data.person;
       if (!person) {
         if (run) await failApolloEnrichmentRun(organizationId, run.id, 'no_match', 'No enrichment data found', data);
+        await supabase
+          .from('leads')
+          .update({ status: 'enrichment_failed', updated_at: new Date().toISOString() })
+          .eq('organization_id', organizationId)
+          .eq('id', lead.id);
         continue;
       }
 
