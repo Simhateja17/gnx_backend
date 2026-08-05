@@ -1,12 +1,20 @@
 import { supabase } from '../lib/supabase';
 import { env } from '../config/env';
-import { DEFAULT_BUSINESS_HOURS, EMAIL_SEQUENCE_DEFAULTS, PLANS, VOICE_DEFAULTS } from '../config/constants';
+import {
+  DEFAULT_BUSINESS_HOURS,
+  EMAIL_SEQUENCE_DEFAULTS,
+  ONBOARDING_ENRICHED_LEAD_TARGET,
+  PLANS,
+  VOICE_DEFAULTS,
+} from '../config/constants';
 import { AppError } from '../types';
 import type { OnboardingInput } from '../schemas/onboarding.schema';
 import { createCampaign, getCampaign, upsertSequenceSteps } from './campaigns.service';
-import { searchApolloForIcp } from './leads.service';
-
-const INITIAL_APOLLO_BATCH_SIZE = 50;
+import { enqueueOnboardingLeads } from '../jobs/onboarding-leads.job';
+import {
+  setOnboardingPreparationProgress,
+  type OnboardingPreparationProgress,
+} from './onboarding-preparation.service';
 
 type AgentConfigSetupRow = {
   id: string;
@@ -14,11 +22,18 @@ type AgentConfigSetupRow = {
 };
 
 type InitialCampaignPreparation = {
-  status: 'ready' | 'attention';
+  status: 'ready' | 'preparing' | 'attention';
   campaign: any;
   apollo: {
-    status: 'ready' | 'already_populated' | 'not_connected' | 'empty' | 'failed';
+    status: 'ready' | 'already_populated' | 'not_connected' | 'preparing' | 'empty' | 'failed';
+    targetEnriched: number;
+    enriched: number;
+    candidatesFound: number;
+    candidatesAttempted: number;
+    failed: number;
+    searchPages: number;
     inserted: number;
+    reused: number;
     skippedDuplicates: number;
     error: string | null;
   };
@@ -104,8 +119,21 @@ async function countCampaignLeads(orgId: string, campaignId: string) {
     .from('leads')
     .select('id', { count: 'exact', head: true })
     .eq('organization_id', orgId)
-    .eq('campaign_id', campaignId);
+    .eq('campaign_id', campaignId)
+    .eq('source', 'apollo');
   if (error) throw new AppError(500, 'Failed to count the initial campaign leads', error);
+  return count ?? 0;
+}
+
+async function countCampaignEnrichedLeads(orgId: string, campaignId: string) {
+  const { count, error } = await supabase
+    .from('leads')
+    .select('id', { count: 'exact', head: true })
+    .eq('organization_id', orgId)
+    .eq('campaign_id', campaignId)
+    .eq('source', 'apollo')
+    .not('last_apollo_enriched_at', 'is', null);
+  if (error) throw new AppError(500, 'Failed to count enriched onboarding leads', error);
   return count ?? 0;
 }
 
@@ -142,42 +170,66 @@ async function prepareInitialCampaign(
   }
 
   const existingLeadCount = await countCampaignLeads(orgId, campaign.id);
+  const enrichedLeadCount = await countCampaignEnrichedLeads(orgId, campaign.id);
+  const targetEnriched = Math.min(
+    ONBOARDING_ENRICHED_LEAD_TARGET,
+    buildInitialCampaignInput(data, planId).maxLeads,
+  );
   let apollo: InitialCampaignPreparation['apollo'] = {
-    status: existingLeadCount > 0 ? 'already_populated' : 'empty',
+    status: enrichedLeadCount >= targetEnriched ? 'already_populated' : 'empty',
+    targetEnriched,
+    enriched: enrichedLeadCount,
+    candidatesFound: existingLeadCount,
+    candidatesAttempted: 0,
+    failed: 0,
+    searchPages: 0,
     inserted: 0,
+    reused: 0,
     skippedDuplicates: 0,
     error: null,
   };
 
-  if (existingLeadCount === 0) {
+  if (enrichedLeadCount < targetEnriched) {
     if (!env.APOLLO_API_KEY) {
       apollo = {
+        ...apollo,
         status: 'not_connected',
-        inserted: 0,
-        skippedDuplicates: 0,
         error: 'Apollo is not connected yet. Connect Apollo from Prospects and run the first search there.',
       };
     } else {
       try {
-        const result = await searchApolloForIcp(orgId, {
-          count: Math.min(INITIAL_APOLLO_BATCH_SIZE, buildInitialCampaignInput(data, planId).maxLeads),
+        const queuedProgress: OnboardingPreparationProgress = {
+          status: 'queued',
+          targetEnriched,
+          enriched: enrichedLeadCount,
+          candidatesFound: existingLeadCount,
+          candidatesAttempted: 0,
+          inserted: 0,
+          reused: 0,
+          skippedDuplicates: 0,
+          failed: 0,
+          searchPages: 0,
+          error: null,
+          updatedAt: new Date().toISOString(),
+        };
+        await setOnboardingPreparationProgress(queuedProgress, campaign.id);
+        await enqueueOnboardingLeads({
+          organizationId: orgId,
+          campaignId: campaign.id,
+          targetEnriched,
           titles: listValue(data.icpTitles),
           locations: listValue(data.icpGeos),
           companySizes: listValue(data.icpCompanySizes),
           keywords: listValue(data.icpTargetIndustries).join(', '),
-          campaignId: campaign.id,
         });
         apollo = {
-          status: result.inserted > 0 ? 'ready' : 'empty',
-          inserted: result.inserted,
-          skippedDuplicates: result.skippedDuplicates,
-          error: result.inserted > 0 ? null : 'Apollo returned no new matching leads for this ICP.',
+          ...apollo,
+          status: 'preparing',
         };
       } catch (error) {
         apollo = {
+          ...apollo,
           status: 'failed',
-          inserted: 0,
-          skippedDuplicates: 0,
           error: safeApolloError(error),
         };
       }
@@ -186,7 +238,11 @@ async function prepareInitialCampaign(
 
   const refreshedCampaign = await getCampaign(orgId, campaign.id);
   return {
-    status: apollo.status === 'failed' || apollo.status === 'not_connected' ? 'attention' : 'ready',
+    status: apollo.status === 'failed' || apollo.status === 'not_connected'
+      ? 'attention'
+      : apollo.status === 'preparing'
+        ? 'preparing'
+        : 'ready',
     campaign: refreshedCampaign,
     apollo,
   };

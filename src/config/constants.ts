@@ -28,6 +28,13 @@ export const VOICE_DEFAULTS = {
 
 export const APOLLO_ENRICHMENT_CAP = 100;
 
+// Onboarding prepares a useful first campaign asynchronously. The target is
+// deliberately below the enrichment cap so there is room for retries and
+// later user-requested enrichment without exhausting the campaign allowance.
+export const ONBOARDING_ENRICHED_LEAD_TARGET = 50;
+export const ONBOARDING_APOLLO_MAX_SEARCH_PAGES = 5;
+export const ONBOARDING_APOLLO_MAX_CANDIDATES = 250;
+
 // Guardrails for the AI agent's "get me N ICP leads" tool: never fetch more
 // than this many net-new leads in one request, and never make more than this
 // many Apollo search calls chasing that count (each call costs real credits).
