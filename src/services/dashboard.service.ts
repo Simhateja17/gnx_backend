@@ -119,7 +119,7 @@ export async function getDashboard(userId: string, orgId: string) {
       .order('updated_at', { ascending: false }),
     supabase
       .from('meetings')
-      .select('id, title, scheduled_at, duration_minutes, join_url, leads(name, first_name, last_name, title, company)')
+      .select('id, title, scheduled_at, duration_minutes, attendee_phone, leads(name, first_name, last_name, title, company)')
       .eq('organization_id', orgId)
       .eq('status', 'scheduled')
       .gte('scheduled_at', now.toISOString())
@@ -292,7 +292,7 @@ export async function getDashboard(userId: string, orgId: string) {
       title: nextMeeting.title,
       scheduledAt: nextMeeting.scheduled_at,
       durationMinutes: nextMeeting.duration_minutes,
-      joinUrl: nextMeeting.join_url,
+      attendeePhone: nextMeeting.attendee_phone,
       attendee: {
         name: [nextMeetingLead?.first_name, nextMeetingLead?.last_name].filter(Boolean).join(' ') || nextMeetingLead?.name || 'Guest',
         title: nextMeetingLead?.title ?? '',
