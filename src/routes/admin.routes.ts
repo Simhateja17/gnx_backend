@@ -55,6 +55,14 @@ router.post('/organizations/:id/suspend', async (req: AuthenticatedRequest, res:
   }
 });
 
+router.post('/organizations/:id/unsuspend', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await adminService.unsuspendOrganization(req.params.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post('/organizations/:id/impersonate', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     const impersonation = await adminService.createImpersonationToken(req.params.id, req.user.id);

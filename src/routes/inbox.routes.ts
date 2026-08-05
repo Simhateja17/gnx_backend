@@ -3,6 +3,9 @@ import { authenticate, AuthenticatedRequest } from '../middleware/auth.middlewar
 import { requireActiveSubscription } from '../middleware/billing.middleware';
 import { AppError } from '../types';
 import { supabase } from '../lib/supabase';
+import { enqueueSendEmail } from '../jobs/send-email.job';
+import { generateEmail } from '../services/ai.service';
+import { getNextStepNumber } from '../services/email.service';
 
 const router = Router();
 
@@ -28,6 +31,10 @@ function timeAgo(dateStr: string): string {
 
 function leadName(lead: any) {
   return [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || lead?.name || 'Unknown';
+}
+
+function sentMessageId(id: string) {
+  return id.startsWith('sent:') ? id.slice(5) : id;
 }
 
 router.get('/', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
@@ -126,12 +133,11 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response, next: NextFu
       return;
     }
 
-    const sentMessageId = req.params.id.startsWith('sent:') ? req.params.id.slice(5) : req.params.id;
     const { data: message, error: messageError } = await supabase
       .from('email_messages')
       .select('id, subject, body, status, sent_at, created_at, lead_id, leads(name, first_name, last_name, company, email, title)')
       .eq('organization_id', orgId)
-      .eq('id', sentMessageId)
+      .eq('id', sentMessageId(req.params.id))
       .maybeSingle();
 
     if (messageError) throw new AppError(500, 'Failed to fetch thread', messageError);
@@ -151,6 +157,87 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response, next: NextFu
         created_at: message.created_at,
       },
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/:id/draft-follow-up', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const orgId = getOrgId(req);
+    const { data: message, error } = await supabase
+      .from('email_messages')
+      .select('id, campaign_id, lead_id, subject')
+      .eq('organization_id', orgId)
+      .eq('id', sentMessageId(req.params.id))
+      .maybeSingle();
+
+    if (error) throw new AppError(500, 'Failed to fetch sent email', error);
+    if (!message) throw new AppError(404, 'Sent email not found');
+    if (!message.campaign_id || !message.lead_id) throw new AppError(400, 'This sent email is not attached to a campaign lead');
+
+    const stepNumber = await getNextStepNumber(message.lead_id, message.campaign_id);
+    const generated = await generateEmail(orgId, {
+      campaignId: message.campaign_id,
+      leadId: message.lead_id,
+      stepNumber,
+    });
+
+    res.json(generated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/:id/follow-up', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const orgId = getOrgId(req);
+    const body = String(req.body?.body ?? '').trim();
+    if (!body) throw new AppError(400, 'Follow-up body is required');
+
+    const { data: message, error } = await supabase
+      .from('email_messages')
+      .select('id, campaign_id, lead_id, subject, gmail_thread_id')
+      .eq('organization_id', orgId)
+      .eq('id', sentMessageId(req.params.id))
+      .maybeSingle();
+
+    if (error) throw new AppError(500, 'Failed to fetch sent email', error);
+    if (!message) throw new AppError(404, 'Sent email not found');
+
+    const stepNumber = await getNextStepNumber(message.lead_id, message.campaign_id ?? null);
+    const subject = message.subject?.toLowerCase().startsWith('re:')
+      ? message.subject
+      : `Re: ${message.subject || 'Your message'}`;
+
+    const { data: queued, error: queueError } = await supabase
+      .from('email_messages')
+      .insert({
+        organization_id: orgId,
+        campaign_id: message.campaign_id ?? null,
+        lead_id: message.lead_id,
+        step_number: stepNumber,
+        subject,
+        body,
+        gmail_thread_id: message.gmail_thread_id ?? null,
+        status: 'queued',
+      })
+      .select('id')
+      .single();
+
+    if (queueError || !queued) throw new AppError(500, 'Failed to queue follow-up email', queueError);
+
+    await enqueueSendEmail({
+      emailMessageId: queued.id,
+      organizationId: orgId,
+      campaignId: message.campaign_id ?? undefined,
+      leadId: message.lead_id,
+      stepNumber,
+    }, {
+      jobId: `send-email-${queued.id}`,
+    });
+
+    res.json({ id: queued.id, status: 'queued', queuedEmailMessageId: queued.id });
   } catch (err) {
     next(err);
   }

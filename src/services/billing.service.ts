@@ -74,7 +74,7 @@ function resolvePlan(providerPlanId: string | undefined, fallbackPlanId?: string
   return { planId: 'starter' as PlanId, billingPeriod: 'monthly' as BillingPeriod };
 }
 
-function providerStatusToOrganizationStatus(status: string): string {
+export function providerStatusToOrganizationStatus(status: string): string {
   if (status === 'active' || status === 'authenticated') return 'active';
   if (status === 'pending') return 'past_due';
   if (['halted', 'cancelled', 'completed', 'expired'].includes(status)) return 'restricted';
@@ -177,7 +177,26 @@ export async function createSubscription(organizationId: string, planId: PlanId,
       customer_notify: true,
       notes: { organizationId, planId, billingPeriod },
     });
-  } catch (error) {
+  } catch (error: any) {
+    // Razorpay returns a bare `{ code, description }` for account-capability
+    // rejections and adds `field`/`source`/`step`/`reason` for field-level ones.
+    // Logging the discriminator is the only way to tell the two apart, since the
+    // HTTP response already forwards whatever Razorpay sent verbatim.
+    const provider = error?.error ?? {};
+    console.error('[billing] Razorpay subscription create failed', {
+      statusCode: error?.statusCode ?? null,
+      providerCode: provider.code ?? null,
+      providerDescription: provider.description ?? null,
+      providerReason: provider.reason ?? null,
+      providerField: provider.field ?? null,
+      providerSource: provider.source ?? null,
+      providerStep: provider.step ?? null,
+      planIdPresent: Boolean(providerPlanId),
+      billingPeriod,
+      totalCount: TOTAL_CYCLES[billingPeriod],
+      quantity: 1,
+      currency: env.RAZORPAY_CURRENCY,
+    });
     throw new AppError(502, 'Razorpay could not create the subscription', error);
   }
 
