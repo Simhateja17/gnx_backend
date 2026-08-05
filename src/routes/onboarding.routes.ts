@@ -4,6 +4,8 @@ import { requireActiveSubscription } from '../middleware/billing.middleware';
 import { validate } from '../middleware/validate.middleware';
 import { onboardingPostSchema, onboardingPutSchema } from '../schemas/onboarding.schema';
 import { submitOnboarding, getOnboarding } from '../services/onboarding.service';
+import { getOnboardingPreparation } from '../services/onboarding-preparation.service';
+import { AppError } from '../types';
 
 const router = Router();
 
@@ -14,6 +16,16 @@ router.post('/', validate(onboardingPostSchema), async (req: AuthenticatedReques
   try {
     const result = await submitOnboarding(req.organization.id, req.body);
     res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/preparation', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const campaignId = typeof req.query.campaignId === 'string' ? req.query.campaignId : '';
+    if (!campaignId) throw new AppError(400, 'campaignId is required');
+    res.json(await getOnboardingPreparation(req.organization.id, campaignId));
   } catch (err) {
     next(err);
   }

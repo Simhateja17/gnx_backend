@@ -32,6 +32,7 @@ import { enqueueSendEmail } from './send-email.job';
 import { enqueuePollInbox } from './poll-inbox.job';
 import { enqueueScheduleCall } from './schedule-call.job';
 import { enqueueEnrichLeads } from './enrich-leads.job';
+import { enqueueOnboardingLeads } from './onboarding-leads.job';
 import { enqueueCsvImport } from './csv-import.job';
 
 describe('BullMQ job retry/backoff configuration', () => {
@@ -61,6 +62,22 @@ describe('BullMQ job retry/backoff configuration', () => {
     const call = addCalls['enrich-leads'].at(-1)!;
     expect(call.options.attempts).toBe(3);
     expect(call.options.backoff).toEqual({ type: 'exponential', delay: 8000 });
+  });
+
+  it('onboarding-leads queues an idempotent preparation job', async () => {
+    await enqueueOnboardingLeads({
+      organizationId: 'o1',
+      campaignId: 'c1',
+      targetEnriched: 50,
+      titles: ['VP Sales'],
+      locations: ['United States'],
+      companySizes: ['51-200'],
+      keywords: 'SaaS',
+    });
+    const call = addCalls['onboarding-leads'].at(-1)!;
+    expect(call.options.jobId).toBe('onboarding-leads:c1');
+    expect(call.options.attempts).toBe(2);
+    expect(call.options.backoff).toEqual({ type: 'exponential', delay: 10000 });
   });
 
   it('csv-import queues with 2 attempts, exponential backoff 5000ms', async () => {

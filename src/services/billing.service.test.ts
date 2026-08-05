@@ -124,6 +124,44 @@ describe('billing service', () => {
     expect(mocks.supabase.from).toHaveBeenCalledWith('subscriptions');
   });
 
+  it('sends exactly the documented Create Subscription fields, with no Order-shaped extras', async () => {
+    for (const [billingPeriod, totalCount] of [['monthly', 120], ['annual', 10]] as const) {
+      mocks.razorpayClient.subscriptions.create.mockClear();
+      await createSubscription('org_1', 'growth', billingPeriod);
+
+      const payload = mocks.razorpayClient.subscriptions.create.mock.calls[0][0];
+
+      // Razorpay rejects the request outright if `total_count` and `end_at` are
+      // both present, and an Order-shaped `amount`/`currency` is not a valid
+      // Subscription field.
+      expect(Object.keys(payload).sort()).toEqual(
+        ['customer_notify', 'notes', 'plan_id', 'quantity', 'total_count'],
+      );
+      expect(payload.plan_id).toMatch(/^plan_/);
+      expect(payload.total_count).toBe(totalCount);
+      expect(Number.isSafeInteger(payload.total_count)).toBe(true);
+      expect(payload.quantity).toBe(1);
+      expect(payload.customer_notify).toBe(true);
+
+      // `notes` is capped at 15 pairs and values must be strings.
+      expect(Object.keys(payload.notes).length).toBeLessThanOrEqual(15);
+      for (const value of Object.values(payload.notes)) {
+        expect(typeof value).toBe('string');
+      }
+    }
+  });
+
+  it('surfaces the Razorpay error object unchanged when the provider rejects the subscription', async () => {
+    const providerError = { statusCode: 400, error: { code: 'BAD_REQUEST_ERROR', description: 'Validation failed' } };
+    mocks.razorpayClient.subscriptions.create.mockRejectedValueOnce(providerError);
+
+    await expect(createSubscription('org_1', 'starter', 'annual')).rejects.toMatchObject({
+      status: 502,
+      details: providerError,
+    });
+    expect(mocks.supabase.rpc).not.toHaveBeenCalledWith('apply_razorpay_subscription_event', expect.anything());
+  });
+
   it('verifies the subscription callback and applies the provider snapshot', async () => {
     const localSubscription = {
       organization_id: 'org_1',

@@ -19,6 +19,7 @@ import systemRoutes from './system.routes';
 import meetingsRoutes from './meetings.routes';
 import calendarRoutes from './calendar.routes';
 import agentRoutes from './agent.routes';
+import setupRoutes from './setup.routes';
 
 const router = Router();
 
@@ -42,5 +43,6 @@ router.use('/system', systemRoutes);
 router.use('/meetings', meetingsRoutes);
 router.use('/calendar', calendarRoutes);
 router.use('/agent', agentRoutes);
+router.use('/setup', setupRoutes);
 
 export default router;

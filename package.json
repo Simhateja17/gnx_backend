@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "workers": "node dist/workers/index.js",
     "billing:provision-plans": "node scripts/provision-razorpay-plans.mjs",
+    "billing:setup-test-plans": "node scripts/setup-razorpay-test-plans.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",

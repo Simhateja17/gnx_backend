@@ -2,7 +2,7 @@ import { Router, Response, NextFunction } from 'express';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth.middleware';
 import { requireActiveSubscription } from '../middleware/billing.middleware';
 import * as voiceService from '../services/voice.service';
-import { listRetellPhoneNumbers } from '../services/retell-phone.service';
+import { listRetellPhoneNumbers, provisionIncludedRetellPhoneNumber } from '../services/retell-phone.service';
 
 const router = Router();
 
@@ -14,6 +14,17 @@ router.get(
   async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
       res.json(await listRetellPhoneNumbers(req.organization.id));
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+router.post(
+  '/phone-numbers/retry',
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      res.json(await provisionIncludedRetellPhoneNumber(req.organization.id));
     } catch (err) {
       next(err);
     }

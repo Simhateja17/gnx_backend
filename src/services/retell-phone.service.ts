@@ -36,6 +36,25 @@ function isRetellConfigured(): boolean {
   return Boolean(env.RETELL_API_KEY);
 }
 
+type RetellWeightedAgent = {
+  agent_id: string;
+  weight: 1;
+  agent_version: 'latest_published';
+};
+
+export function buildRetellPhoneAgentBindings(agentId: string) {
+  const binding: RetellWeightedAgent = {
+    agent_id: agentId,
+    weight: 1,
+    agent_version: 'latest_published',
+  };
+
+  return {
+    inbound_agents: [binding],
+    outbound_agents: [{ ...binding }],
+  } as const;
+}
+
 export function buildIncludedPhonePurchaseRequest(input: {
   country: 'US' | 'CA';
   organizationName: string;
@@ -44,8 +63,7 @@ export function buildIncludedPhonePurchaseRequest(input: {
   return {
     country_code: input.country,
     toll_free: false,
-    inbound_agent_id: input.agentId ?? null,
-    outbound_agent_id: input.agentId ?? null,
+    ...(input.agentId ? buildRetellPhoneAgentBindings(input.agentId) : {}),
     nickname: `${input.organizationName} included number`,
   } as const;
 }
@@ -208,21 +226,35 @@ export async function provisionIncludedRetellPhoneNumber(
 
   const agentId = entitlement.agentConfig?.retell_agent_id ?? null;
   try {
+    // retell-sdk 4.0.0 still exposes the removed single-agent fields in its
+    // TypeScript definitions. The API request itself must use the weighted
+    // agent arrays, so keep this cast at the SDK boundary until the package is
+    // updated.
     const purchased = await retell.phoneNumber.create(buildIncludedPhonePurchaseRequest({
       country: entitlement.country,
       organizationName: entitlement.organizationName,
       agentId,
-    }));
+    }) as any);
 
     const phoneNumber = purchased.phone_number;
+    const purchasedWithCurrentAgentFields = purchased as typeof purchased & {
+      inbound_agents?: Array<{ agent_id?: string }>;
+      outbound_agents?: Array<{ agent_id?: string }>;
+    };
     const { error: updateError } = await supabase
       .from('retell_phone_numbers')
       .update({
         provider_phone_id: phoneNumber,
         phone_number: phoneNumber,
         status: 'active',
-        inbound_agent_id: purchased.inbound_agent_id ?? agentId,
-        outbound_agent_id: purchased.outbound_agent_id ?? agentId,
+        // These columns are an internal compatibility mirror. They are not
+        // sent back to Retell; provider_metadata stores the current arrays.
+        inbound_agent_id: purchasedWithCurrentAgentFields.inbound_agents?.[0]?.agent_id
+          ?? purchased.inbound_agent_id
+          ?? agentId,
+        outbound_agent_id: purchasedWithCurrentAgentFields.outbound_agents?.[0]?.agent_id
+          ?? purchased.outbound_agent_id
+          ?? agentId,
         provider_metadata: purchased,
         provisioned_at: new Date().toISOString(),
         last_reconciled_at: new Date().toISOString(),
@@ -280,10 +312,11 @@ export async function bindActiveRetellPhoneNumbers(organizationId: string, agent
   for (const row of rows ?? []) {
     if (!row.phone_number) continue;
     try {
-      const updated = await retell.phoneNumber.update(row.phone_number, {
-        inbound_agent_id: agentId,
-        outbound_agent_id: agentId,
-      });
+      // Keep rebinding on the same current Retell API contract as purchase.
+      const updated = await retell.phoneNumber.update(
+        row.phone_number,
+        buildRetellPhoneAgentBindings(agentId) as any,
+      );
       await supabase.from('retell_phone_numbers').update({
         inbound_agent_id: agentId,
         outbound_agent_id: agentId,

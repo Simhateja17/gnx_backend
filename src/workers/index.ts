@@ -7,12 +7,18 @@ import { supabase } from '../lib/supabase';
 import { enqueueRecurringPollInbox } from '../jobs/poll-inbox.job';
 import { enqueueScheduleCall } from '../jobs/schedule-call.job';
 import { enqueueRecurringBillingRenewalCheck } from '../jobs/billing-renewal-check.job';
+import type { OnboardingLeadsJobData } from '../jobs/onboarding-leads.job';
 import { sendEmail, checkSendCap } from '../services/email.service';
 import { pollInbox } from '../services/gmail.service';
 import { scheduleCall } from '../services/voice.service';
 import { enrichLeads } from '../services/leads.service';
 import { processCsvImportJob } from '../services/leads.service';
 import { runRenewalCheck } from '../services/billing.service';
+import {
+  getOnboardingPreparationProgress,
+  prepareApolloLeadsForCampaign,
+  setOnboardingPreparationProgress,
+} from '../services/onboarding-preparation.service';
 import type { SendEmailJobData } from '../jobs/send-email.job';
 import type { PollInboxJobData } from '../jobs/poll-inbox.job';
 import type { ScheduleCallJobData } from '../jobs/schedule-call.job';
@@ -129,6 +135,29 @@ const enrichLeadsWorker = new Worker<EnrichLeadsJobData>('enrich-leads', async (
   concurrency: 2,
 });
 
+const onboardingLeadsWorker = new Worker<OnboardingLeadsJobData>('onboarding-leads', async (job) => {
+  console.log(`[onboarding-leads] Processing job ${job.id} for campaign ${job.data.campaignId}`);
+  try {
+    const result = await prepareApolloLeadsForCampaign(job.data);
+    console.log(`[onboarding-leads] Campaign ${job.data.campaignId}: ${result.enriched}/${result.targetEnriched} enriched leads ready`);
+    return result;
+  } catch (error) {
+    const progress = await getOnboardingPreparationProgress(job.data.campaignId);
+    if (progress) {
+      await setOnboardingPreparationProgress({
+        ...progress,
+        status: 'attention',
+        error: error instanceof Error ? error.message : 'Apollo onboarding preparation failed',
+        updatedAt: new Date().toISOString(),
+      }, job.data.campaignId);
+    }
+    throw error;
+  }
+}, {
+  connection: redisConnection,
+  concurrency: 1,
+});
+
 const csvImportWorker = new Worker<CsvImportJobData>('csv-import', async (job) => {
   console.log(`[csv-import] Processing job ${job.id}: ${job.data.fileName} (${job.data.totalRows} rows)`);
   const result = await processCsvImportJob(job.id!, job.data);
@@ -159,6 +188,7 @@ sendEmailWorker.on('failed', (job, err) => reportJobFailure('send-email', job, e
 pollInboxWorker.on('failed', (job, err) => reportJobFailure('poll-inbox', job, err));
 scheduleCallWorker.on('failed', (job, err) => reportJobFailure('schedule-call', job, err));
 enrichLeadsWorker.on('failed', (job, err) => reportJobFailure('enrich-leads', job, err));
+onboardingLeadsWorker.on('failed', (job, err) => reportJobFailure('onboarding-leads', job, err));
 csvImportWorker.on('failed', (job, err) => reportJobFailure('csv-import', job, err));
 billingRenewalCheckWorker.on('failed', (job, err) => reportJobFailure('billing-renewal-check', job, err));
 
@@ -172,10 +202,11 @@ sendEmailWorker.on('error', (err) => reportConnectionError('send-email', err));
 pollInboxWorker.on('error', (err) => reportConnectionError('poll-inbox', err));
 scheduleCallWorker.on('error', (err) => reportConnectionError('schedule-call', err));
 enrichLeadsWorker.on('error', (err) => reportConnectionError('enrich-leads', err));
+onboardingLeadsWorker.on('error', (err) => reportConnectionError('onboarding-leads', err));
 csvImportWorker.on('error', (err) => reportConnectionError('csv-import', err));
 billingRenewalCheckWorker.on('error', (err) => reportConnectionError('billing-renewal-check', err));
 
-console.log('Workers started: send-email, poll-inbox, schedule-call, enrich-leads, csv-import, billing-renewal-check');
+console.log('Workers started: send-email, poll-inbox, schedule-call, enrich-leads, onboarding-leads, csv-import, billing-renewal-check');
 
 void enqueueRecurringBillingRenewalCheck();
 
