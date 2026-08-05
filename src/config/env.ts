@@ -16,7 +16,12 @@ const envSchema = z.object({
   GOOGLE_CLIENT_ID: z.string().trim().default(''),
   GOOGLE_CLIENT_SECRET: z.string().trim().default(''),
   GOOGLE_REDIRECT_URI: z.string().default('http://localhost:5000/api/gmail/callback'),
-  GOOGLE_CALENDAR_REDIRECT_URI: z.string().default('http://localhost:5000/api/calendar/callback'),
+
+  // Public origin Retell's servers can reach to invoke our custom
+  // function tools mid-call (check_availability, book_meeting, etc).
+  // Must be a real internet-facing URL - localhost/tunnels won't work.
+  BACKEND_PUBLIC_URL: z.string().url().default('http://localhost:5000'),
+  RETELL_TOOL_SECRET: z.string().trim().default(''),
 
   AZURE_OPENAI_ENDPOINT: z.string().default(''),
   AZURE_OPENAI_API_KEY: z.string().trim().default(''),

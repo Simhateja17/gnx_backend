@@ -32,6 +32,84 @@ const GENERAL_TOOLS = [
   },
 ];
 
+// Real-time booking tools: Retell hits these URLs mid-call, synchronously,
+// while the prospect is still on the line. They're static per-agent (set
+// here, not per-call), so org identity is resolved server-side from the
+// call_id Retell sends - see retell-tools.service.ts.
+function buildMeetingTools() {
+  const toolUrl = (name: string) => `${env.BACKEND_PUBLIC_URL}/webhooks/retell/tools/${name}`;
+  const headers = { 'x-tool-secret': env.RETELL_TOOL_SECRET };
+
+  return [
+    {
+      name: 'check_availability',
+      type: 'custom' as const,
+      url: toolUrl('check-availability'),
+      method: 'POST' as const,
+      headers,
+      description: 'Look up open meeting slots on our calendar. Call this right after the prospect agrees to a meeting, and again if they reject the offered times after telling you their preferred day or time of day.',
+      speak_during_execution: true,
+      speak_after_execution: true,
+      timeout_ms: 8000,
+      parameters: {
+        type: 'object' as const,
+        properties: {
+          preferred_day: { type: 'string', description: 'The day the prospect prefers, e.g. "Tuesday" or "next week", if they stated one. Omit otherwise.' },
+          preferred_time_of_day: { type: 'string', enum: ['morning', 'afternoon', 'evening'], description: 'Time of day the prospect prefers, if stated.' },
+        },
+      },
+    },
+    {
+      name: 'book_meeting',
+      type: 'custom' as const,
+      url: toolUrl('book-meeting'),
+      method: 'POST' as const,
+      headers,
+      description: 'Lock in the meeting at the exact slot the prospect just verbally agreed to. Only call this once, right after they confirm a specific time from check_availability results - it books immediately with no further confirmation step.',
+      speak_during_execution: true,
+      speak_after_execution: true,
+      timeout_ms: 8000,
+      parameters: {
+        type: 'object' as const,
+        properties: {
+          start_at: { type: 'string', description: 'The exact ISO 8601 start time of the slot the prospect agreed to, copied exactly from a check_availability result.' },
+        },
+        required: ['start_at'],
+      },
+    },
+    {
+      name: 'reschedule_meeting',
+      type: 'custom' as const,
+      url: toolUrl('reschedule-meeting'),
+      method: 'POST' as const,
+      headers,
+      description: "Move this prospect's existing booked meeting to a new time. Call check_availability first to find a new open slot, then call this once they agree to one.",
+      speak_during_execution: true,
+      speak_after_execution: true,
+      timeout_ms: 8000,
+      parameters: {
+        type: 'object' as const,
+        properties: {
+          new_start_at: { type: 'string', description: 'The new ISO 8601 start time the prospect agreed to.' },
+        },
+        required: ['new_start_at'],
+      },
+    },
+    {
+      name: 'cancel_meeting',
+      type: 'custom' as const,
+      url: toolUrl('cancel-meeting'),
+      method: 'POST' as const,
+      headers,
+      description: "Cancel this prospect's existing booked meeting if they no longer want it and don't want to reschedule.",
+      speak_during_execution: true,
+      speak_after_execution: true,
+      timeout_ms: 8000,
+      parameters: { type: 'object' as const, properties: {} },
+    },
+  ];
+}
+
 export async function createOrUpdateRetellAgent(organizationId: string) {
   const { data: agentConfig, error } = await supabase
     .from('agent_configs')
@@ -56,7 +134,7 @@ export async function createOrUpdateRetellAgent(organizationId: string) {
       };
     } else {
       // Backward-compatible default while organizations migrate to Flow.
-      const llm = await retell.llm.create({ general_prompt: prompt ?? '', general_tools: GENERAL_TOOLS }).catch((err: any) => {
+      const llm = await retell.llm.create({ general_prompt: prompt ?? '', general_tools: [...GENERAL_TOOLS, ...buildMeetingTools()] }).catch((err: any) => {
         throw new AppError(502, `Failed to create Retell LLM: ${err.message}`);
       });
       llmId = llm.llm_id;
@@ -93,7 +171,7 @@ export async function createOrUpdateRetellAgent(organizationId: string) {
     };
   } else {
     const llmId = agentConfig.retell_llm_id ?? await resolveLlmId(agentConfig.retell_agent_id, organizationId);
-    await retell.llm.update(llmId, { general_prompt: prompt ?? '', general_tools: GENERAL_TOOLS }).catch((err: any) => {
+    await retell.llm.update(llmId, { general_prompt: prompt ?? '', general_tools: [...GENERAL_TOOLS, ...buildMeetingTools()] }).catch((err: any) => {
       throw new AppError(502, `Failed to update Retell LLM: ${err.message}`);
     });
     responseEngine = { type: 'retell-llm', llm_id: llmId };
@@ -336,7 +414,17 @@ export async function handleRetellWebhook(rawBody: Buffer, signature: string) {
       disposition,
     }).eq('id', callRecord.id);
 
-    if (disposition === 'meeting_booked') {
+    // book_meeting already sets lead.status in real time when the agent
+    // actually locks a slot mid-call - that's the authoritative signal. This
+    // is only a backup for the case where the agent said something like a
+    // meeting was booked but never called the tool (hallucination/bug).
+    const { data: realTimeMeeting } = await supabase
+      .from('meetings')
+      .select('id')
+      .eq('call_id', callRecord.id)
+      .maybeSingle();
+
+    if (disposition === 'meeting_booked' && !realTimeMeeting) {
       await supabase.from('leads').update({ status: 'meeting_booked' }).eq('id', callRecord.lead_id);
 
       posthog?.capture({
