@@ -225,7 +225,7 @@ export async function checkCampaignReadiness(
   const warnings: string[] = [];
 
   if (channel !== 'voice' && !integrations.gmail.connected) {
-    blockers.push('Gmail is not connected, so this campaign cannot send email.');
+    blockers.push('No email account is connected, so this campaign cannot send email. Connect Gmail or custom SMTP/IMAP in Settings.');
   }
   if (channel !== 'email' && !integrations.retell.connected) {
     blockers.push(integrations.retell.detail);

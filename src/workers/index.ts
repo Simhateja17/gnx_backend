@@ -9,7 +9,7 @@ import { enqueueScheduleCall } from '../jobs/schedule-call.job';
 import { enqueueRecurringBillingRenewalCheck } from '../jobs/billing-renewal-check.job';
 import type { OnboardingLeadsJobData } from '../jobs/onboarding-leads.job';
 import { sendEmail, checkSendCap } from '../services/email.service';
-import { pollInbox } from '../services/gmail.service';
+import { pollInbox } from '../services/inbox-poll.service';
 import { scheduleCall } from '../services/voice.service';
 import { enrichLeads } from '../services/leads.service';
 import { processCsvImportJob } from '../services/leads.service';
@@ -214,7 +214,8 @@ async function scheduleRecurringInboxPolls() {
   const { data, error } = await supabase
     .from('connected_accounts')
     .select('id,organization_id')
-    .eq('provider', 'gmail');
+    .in('provider', ['gmail', 'smtp'])
+    .eq('is_active', true);
 
   if (error) {
     console.error('[poll-inbox] Failed to schedule recurring poll jobs:', error.message);
@@ -228,7 +229,7 @@ async function scheduleRecurringInboxPolls() {
     });
   }
 
-  console.log(`[poll-inbox] Scheduled recurring poll jobs for ${data?.length ?? 0} Gmail accounts`);
+  console.log(`[poll-inbox] Scheduled recurring poll jobs for ${data?.length ?? 0} active email accounts`);
 }
 
 void scheduleRecurringInboxPolls();

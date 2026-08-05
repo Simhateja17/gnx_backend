@@ -170,6 +170,8 @@ export async function prepareApolloLeadsForCampaign(criteria: OnboardingPreparat
     status: 'preparing',
   };
 
+  console.log(`[onboarding-apollo] starting campaign ${criteria.campaignId} for ${targetEnriched} enriched leads`);
+
   await setOnboardingPreparationProgress(progress, criteria.campaignId);
 
   const initialCounts = await readCampaignLeadCounts(criteria.organizationId, criteria.campaignId);
@@ -221,6 +223,8 @@ export async function prepareApolloLeadsForCampaign(criteria: OnboardingPreparat
     progress.reused += result.reused;
     progress.skippedDuplicates += result.skipped;
 
+    console.log(`[onboarding-apollo] campaign ${criteria.campaignId} page ${page}: ${result.matchesReturned} Apollo matches, ${result.inserted} inserted, ${result.reused} reused`);
+
     const candidateIds = [...new Set(result.candidateIds.filter(id => !attemptedLeadIds.has(id)))];
     progress.candidatesFound += candidateIds.length;
     // Mark every candidate as seen, including leads that were already
@@ -256,6 +260,7 @@ export async function prepareApolloLeadsForCampaign(criteria: OnboardingPreparat
   progress.error = finalError(progress, lastMatchesReturned);
   progress.updatedAt = new Date().toISOString();
   await setOnboardingPreparationProgress(progress, criteria.campaignId);
+  console.log(`[onboarding-apollo] campaign ${criteria.campaignId} finished with ${progress.enriched}/${targetEnriched} enriched leads (${progress.status})`);
   return progress;
 }
 
@@ -281,6 +286,7 @@ export async function getOnboardingPreparation(organizationId: string, campaignI
 
   return {
     ...progress,
+    campaignId,
     status,
     enriched: counts.enriched,
     attached: counts.attached,
@@ -288,4 +294,17 @@ export async function getOnboardingPreparation(organizationId: string, campaignI
     failed: counts.failed,
     updatedAt: new Date().toISOString(),
   };
+}
+
+export async function getCurrentOnboardingPreparation(organizationId: string) {
+  const { data: agentConfig, error } = await supabase
+    .from('agent_configs')
+    .select('onboarding_campaign_id')
+    .eq('organization_id', organizationId)
+    .maybeSingle();
+
+  if (error) throw new AppError(500, 'Failed to find the onboarding campaign', error);
+  if (!agentConfig?.onboarding_campaign_id) return null;
+
+  return getOnboardingPreparation(organizationId, agentConfig.onboarding_campaign_id);
 }

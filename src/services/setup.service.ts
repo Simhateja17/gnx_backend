@@ -215,10 +215,10 @@ export async function getIntegrationStates(organizationId: string): Promise<Inte
   const [gmailResult, calendarResult, phoneResult, agentConfigResult, apolloLeadResult] = await Promise.all([
     supabase
       .from('connected_accounts')
-      .select('provider_account_id,expires_at')
+      .select('provider,provider_account_id,is_active,updated_at')
       .eq('organization_id', organizationId)
-      .eq('provider', 'gmail')
-      .maybeSingle(),
+      .in('provider', ['gmail', 'smtp'])
+      .order('updated_at', { ascending: false }),
     supabase
       .from('calendar_connections')
       .select('connected_email,status,selected_calendar_name,timezone,last_error,access_token,refresh_token')
@@ -242,19 +242,25 @@ export async function getIntegrationStates(organizationId: string): Promise<Inte
       .eq('source', 'apollo'),
   ]);
 
-  const gmailRow = gmailResult.data;
+  const emailRows = (gmailResult.data ?? []) as Array<{
+    provider: 'gmail' | 'smtp';
+    provider_account_id: string | null;
+    is_active: boolean | null;
+  }>;
+  const gmailRow = emailRows.find(row => row.is_active !== false) ?? emailRows[0] ?? null;
+  const emailProviderLabel = gmailRow?.provider === 'smtp' ? 'Custom SMTP' : 'Gmail';
   const gmail: IntegrationState = gmailRow
     ? {
         connected: true,
         status: 'connected',
         label: gmailRow.provider_account_id ?? null,
-        detail: `Sending from ${gmailRow.provider_account_id ?? 'the connected mailbox'}.`,
+        detail: `Sending from ${gmailRow.provider_account_id ?? 'the connected mailbox'} via ${emailProviderLabel}.`,
       }
     : {
         connected: false,
         status: 'disconnected',
         label: null,
-        detail: 'Gmail is not connected yet. Emails cannot be sent until it is.',
+        detail: 'No email account is connected yet. Connect Gmail or a custom SMTP/IMAP mailbox before sending.',
       };
 
   const calendarRow = calendarResult.data as

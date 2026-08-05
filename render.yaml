@@ -23,6 +23,8 @@ services:
         sync: false
       - key: COOKIE_SECRET
         sync: false
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
@@ -108,6 +110,8 @@ services:
       - key: JWT_SECRET
         sync: false
       - key: COOKIE_SECRET
+        sync: false
+      - key: CREDENTIAL_ENCRYPTION_KEY
         sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false

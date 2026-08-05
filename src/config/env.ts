@@ -17,6 +17,9 @@ const envSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().trim().default(''),
   GOOGLE_REDIRECT_URI: z.string().default('http://localhost:5000/api/gmail/callback'),
   GOOGLE_CALENDAR_REDIRECT_URI: z.string().default('http://localhost:5000/api/calendar/callback'),
+  // Required at runtime when a workspace saves a custom SMTP/IMAP connection.
+  // Generate with: openssl rand -hex 32
+  CREDENTIAL_ENCRYPTION_KEY: z.string().trim().default(''),
 
   AZURE_OPENAI_ENDPOINT: z.string().default(''),
   AZURE_OPENAI_API_KEY: z.string().trim().default(''),

@@ -175,7 +175,7 @@ describe('readiness checks', () => {
     const readiness = await checkCampaignReadiness(ORG, 'email', []);
 
     expect(readiness.ok).toBe(false);
-    expect(readiness.blockers[0]).toMatch(/Gmail is not connected/i);
+    expect(readiness.blockers[0]).toMatch(/No email account is connected/i);
   });
 
   it('blocks a voice campaign when the voice agent is not ready', async () => {
@@ -240,7 +240,7 @@ describe('readiness checks', () => {
   it('refuses to create a campaign that fails readiness', async () => {
     integrationsMock.value.gmail = { connected: false, status: 'disconnected', label: null, detail: '' } as any;
 
-    await expect(createCampaignFromCopilot(ORG, baseInput())).rejects.toThrow(/Gmail is not connected/i);
+    await expect(createCampaignFromCopilot(ORG, baseInput())).rejects.toThrow(/No email account is connected/i);
     expect(campaignsMock.createCampaign).not.toHaveBeenCalled();
   });
 });

@@ -197,7 +197,7 @@ router.post('/:id/follow-up', async (req: AuthenticatedRequest, res: Response, n
 
     const { data: message, error } = await supabase
       .from('email_messages')
-      .select('id, campaign_id, lead_id, subject, gmail_thread_id')
+      .select('id, campaign_id, lead_id, subject, gmail_thread_id, provider_thread_id')
       .eq('organization_id', orgId)
       .eq('id', sentMessageId(req.params.id))
       .maybeSingle();
@@ -219,6 +219,7 @@ router.post('/:id/follow-up', async (req: AuthenticatedRequest, res: Response, n
         step_number: stepNumber,
         subject,
         body,
+        provider_thread_id: message.provider_thread_id ?? message.gmail_thread_id ?? null,
         gmail_thread_id: message.gmail_thread_id ?? null,
         status: 'queued',
       })

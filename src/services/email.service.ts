@@ -1,30 +1,17 @@
 import { supabase } from '../lib/supabase';
 import { sendGmailMessage } from '../lib/gmail';
+import { sendSmtpMessage } from '../lib/smtp';
 import { enqueueSendEmail } from '../jobs/send-email.job';
 import { generateEmail, generateReply } from './ai.service';
+import {
+  getActiveEmailConnection,
+  smtpConfigFromConnection,
+} from './email-connection.service';
 import { posthog } from '../lib/posthog';
 import { AppError } from '../types';
 
 const UNSUBSCRIBE_FOOTER = `\n\n---\nIf you'd like to stop receiving emails, reply "unsubscribe"\nGlobonexo | Company Address`;
 const STOP_SEQUENCE_STATUSES = ['engaged', 'meeting_booked', 'not_interested', 'unsubscribed'];
-
-async function getGmailCredentials(organizationId: string) {
-  const { data, error } = await supabase
-    .from('connected_accounts')
-    .select('provider_account_id,access_token,refresh_token')
-    .eq('organization_id', organizationId)
-    .eq('provider', 'gmail')
-    .maybeSingle();
-
-  if (error) throw new AppError(500, 'Failed to fetch Gmail credentials', error);
-  if (!data || !data.access_token) throw new AppError(400, 'Gmail is not connected for this organization');
-
-  return {
-    email: data.provider_account_id,
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token,
-  };
-}
 
 // There's no org-level timezone column — only campaigns.timezone, which is
 // per-campaign — so this uses the org's most recently created campaign's
@@ -126,7 +113,7 @@ export async function getNextStepNumber(leadId: string, campaignId: string | nul
 export async function approveAiDraftReply(organizationId: string, replyId: string, editedBody?: string) {
   const { data: reply, error } = await supabase
     .from('email_replies')
-    .select('id, lead_id, ai_draft_reply, ai_draft_status, email_messages(subject, campaign_id, gmail_thread_id)')
+    .select('id, lead_id, provider_thread_id, ai_draft_reply, ai_draft_status, email_messages(subject, campaign_id, gmail_thread_id, provider_thread_id)')
     .eq('id', replyId)
     .eq('organization_id', organizationId)
     .single();
@@ -151,6 +138,7 @@ export async function approveAiDraftReply(organizationId: string, replyId: strin
       step_number: nextStepNumber,
       subject,
       body: approvedBody,
+      provider_thread_id: reply.provider_thread_id ?? originalMessage?.provider_thread_id ?? originalMessage?.gmail_thread_id ?? null,
       gmail_thread_id: originalMessage?.gmail_thread_id ?? null,
       status: 'queued',
     })
@@ -452,8 +440,14 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
   // step in this same function throwing, or any transient BullMQ retry) would
   // silently send a real duplicate email with no guard against it.
   if (msg.status === 'sent') {
-    console.log(`[send-email] Message ${emailMessageId} already sent (gmailMessageId=${msg.gmail_message_id}), skipping duplicate send`);
-    return { success: true, alreadySent: true, gmailMessageId: msg.gmail_message_id };
+    const providerMessageId = msg.provider_message_id ?? msg.gmail_message_id;
+    console.log(`[send-email] Message ${emailMessageId} already sent (providerMessageId=${providerMessageId}), skipping duplicate send`);
+    return {
+      success: true,
+      alreadySent: true,
+      providerMessageId,
+      gmailMessageId: msg.gmail_message_id ?? providerMessageId,
+    };
   }
 
   const toEmail = msg.leads?.email;
@@ -503,43 +497,87 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
 
   body += UNSUBSCRIBE_FOOTER;
 
-  const gmail = await getGmailCredentials(organizationId);
-  console.log(`[send-email] Sending message ${emailMessageId} to ${toEmail} from ${gmail.email}`);
+  const connection = await getActiveEmailConnection(organizationId);
+  if (!connection || !connection.email) {
+    throw new AppError(400, 'No active email account is connected for this organization');
+  }
+
+  const providerLabel = connection.provider === 'smtp' ? 'custom SMTP' : 'Gmail';
+  const parentThreadId = connection.provider === 'gmail'
+    ? (msg.gmail_thread_id ?? msg.provider_thread_id)
+    : msg.provider_thread_id;
+  console.log(`[send-email] Sending message ${emailMessageId} via ${providerLabel} to ${toEmail} from ${connection.email}`);
 
   try {
-    const result = await sendGmailMessage(
-      gmail.accessToken,
-      gmail.refreshToken,
-      gmail.email,
-      toEmail,
-      subject,
-      body,
-      {
-        threadId: msg.gmail_thread_id,
-        onTokenRefresh: (tokens) => {
-          void supabase
-            .from('connected_accounts')
-            .update({
-              access_token: tokens.access_token,
-              expires_at: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
-              updated_at: new Date().toISOString(),
-            })
-            .eq('organization_id', organizationId)
-            .eq('provider', 'gmail')
-            .then(({ error }) => {
-              if (error) console.error(`[send-email] Failed to persist refreshed Gmail token for org ${organizationId}:`, error.message);
-            });
+    let providerMessageId: string | null = null;
+    let providerThreadId: string | null = null;
+    let gmailMessageId: string | null = null;
+    let gmailThreadId: string | null = null;
+
+    if (connection.provider === 'gmail') {
+      if (!connection.accessToken || !connection.refreshToken) {
+        throw new AppError(400, 'Gmail is not connected correctly. Reconnect Gmail in Settings.');
+      }
+
+      const result = await sendGmailMessage(
+        connection.accessToken,
+        connection.refreshToken,
+        connection.email,
+        toEmail,
+        subject,
+        body,
+        {
+          threadId: parentThreadId,
+          onTokenRefresh: (tokens) => {
+            void supabase
+              .from('connected_accounts')
+              .update({
+                access_token: tokens.access_token,
+                expires_at: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', connection.id)
+              .then(({ error }) => {
+                if (error) console.error(`[send-email] Failed to persist refreshed Gmail token for org ${organizationId}:`, error.message);
+              });
+          },
         },
-      },
-    );
+      );
+
+      providerMessageId = result.messageId;
+      providerThreadId = result.threadId;
+      gmailMessageId = result.messageId;
+      gmailThreadId = result.threadId;
+    } else {
+      const smtpConnection = smtpConfigFromConnection(connection);
+      const result = await sendSmtpMessage(smtpConnection.smtp, {
+        from: connection.email,
+        displayName: smtpConnection.displayName,
+        to: toEmail,
+        subject,
+        text: body,
+        inReplyTo: parentThreadId,
+      });
+
+      providerMessageId = result.messageId;
+      // SMTP/IMAP does not expose a provider thread identifier. We use the
+      // first outbound Message-ID as the conversation anchor and carry it
+      // through subsequent sequence messages.
+      providerThreadId = parentThreadId ?? result.messageId;
+    }
+
+    if (!providerMessageId) throw new AppError(502, `${providerLabel} did not return a message ID`);
 
     await supabase
       .from('email_messages')
       .update({
         status: 'sent',
         sent_at: new Date().toISOString(),
-        gmail_message_id: result.messageId,
-        gmail_thread_id: result.threadId,
+        provider_message_id: providerMessageId,
+        provider_thread_id: providerThreadId,
+        ...(connection.provider === 'gmail'
+          ? { gmail_message_id: gmailMessageId, gmail_thread_id: gmailThreadId }
+          : {}),
       })
       .eq('id', emailMessageId);
 
@@ -549,11 +587,11 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
       .eq('id', msg.lead_id)
       .eq('status', 'queued');
 
-    console.log(`[send-email] Sent message ${emailMessageId}. gmailMessageId=${result.messageId}, threadId=${result.threadId}`);
+    console.log(`[send-email] Sent message ${emailMessageId}. provider=${connection.provider}, providerMessageId=${providerMessageId}, threadId=${providerThreadId}`);
     posthog?.capture({
       distinctId: organizationId,
       event: 'email_sent',
-      properties: { emailMessageId, campaignId: msg.campaign_id, leadId: msg.lead_id, stepNumber },
+      properties: { emailMessageId, campaignId: msg.campaign_id, leadId: msg.lead_id, stepNumber, provider: connection.provider },
     });
 
     if (msg.sequence_step_id && msg.campaign_id && msg.lead_id) {
@@ -562,19 +600,26 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
         campaignId: msg.campaign_id,
         leadId: msg.lead_id,
         currentStepNumber: stepNumber,
+        providerThreadId,
+        provider: connection.provider,
       });
     }
 
-    return { success: true, gmailMessageId: result.messageId };
+    return {
+      success: true,
+      provider: connection.provider,
+      providerMessageId,
+      gmailMessageId: gmailMessageId ?? providerMessageId,
+    };
   } catch (err: any) {
-    console.error(`[send-email] Failed message ${emailMessageId}: ${err.message}`);
+    console.error(`[send-email] Failed message ${emailMessageId} via ${providerLabel}: ${err.message}`);
     await supabase
       .from('email_messages')
       .update({ status: 'failed' })
       .eq('id', emailMessageId);
 
     const providerError = err.response?.data?.error ?? err.message;
-    if (providerError === 'unauthorized_client') {
+    if (connection.provider === 'gmail' && providerError === 'unauthorized_client') {
       throw new AppError(
         502,
         'Gmail send failed: this Gmail connection is not authorized. Reconnect Gmail in Settings, then try again.',
@@ -582,7 +627,7 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
       );
     }
 
-    throw new AppError(502, `Gmail send failed: ${err.message}`, err.response?.data);
+    throw new AppError(502, `${providerLabel} send failed: ${err.message}`, err.response?.data);
   }
 }
 
@@ -598,8 +643,10 @@ async function enqueueNextSequenceStep(input: {
   campaignId: string;
   leadId: string;
   currentStepNumber: number;
+  providerThreadId: string | null;
+  provider: 'gmail' | 'smtp';
 }) {
-  const { organizationId, campaignId, leadId, currentStepNumber } = input;
+  const { organizationId, campaignId, leadId, currentStepNumber, providerThreadId, provider } = input;
 
   const { data: nextStep, error: stepError } = await supabase
     .from('email_sequence_steps')
@@ -654,6 +701,8 @@ async function enqueueNextSequenceStep(input: {
       step_number: nextStep.step_number,
       subject: '',
       body: '',
+      provider_thread_id: providerThreadId,
+      ...(provider === 'gmail' ? { gmail_thread_id: providerThreadId } : {}),
       status: 'queued',
     })
     .select('id')
