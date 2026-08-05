@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { env } from '../config/env';
-import { enrichApolloOrganization, getApolloOrganization } from '../lib/apollo';
+import {
+  enrichApolloOrganization,
+  getApolloOrganization,
+} from '../lib/apollo';
+import type { ApolloRequestContext } from '../lib/apollo';
 import { supabase } from '../lib/supabase';
 import { AppError } from '../types';
 
@@ -635,7 +639,10 @@ export function hashApolloPayload(value: unknown) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
-export async function enrichOrganizationForPerson(person: ApolloPerson) {
+export async function enrichOrganizationForPerson(
+  person: ApolloPerson,
+  context: ApolloRequestContext = {},
+) {
   const embedded = asRecord(person.organization);
   const embeddedOrgId = firstString(embedded?.id, embedded?.organization_id, person.organization_id);
   const embeddedDomain = firstString(embedded?.primary_domain, embedded?.domain);
@@ -655,14 +662,17 @@ export async function enrichOrganizationForPerson(person: ApolloPerson) {
 
   try {
     if (embeddedDomain) {
-      const response = await enrichApolloOrganization({ domain: normalizeApolloDomain(embeddedDomain) ?? embeddedDomain });
+      const response = await enrichApolloOrganization(
+        { domain: normalizeApolloDomain(embeddedDomain) ?? embeddedDomain },
+        context,
+      );
       return unwrapOrganization(response) ?? embedded;
     }
     if (embeddedOrgId) {
-      const response = await getApolloOrganization(embeddedOrgId);
+      const response = await getApolloOrganization(embeddedOrgId, context);
       return unwrapOrganization(response) ?? embedded;
     }
-    const response = await enrichApolloOrganization({ name: embeddedName as string });
+    const response = await enrichApolloOrganization({ name: embeddedName as string }, context);
     return unwrapOrganization(response) ?? embedded;
   } catch (error) {
     console.warn('[apollo] organization enrichment unavailable; using embedded organization data:', error instanceof Error ? error.message : error);

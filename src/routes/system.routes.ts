@@ -46,7 +46,7 @@ router.get('/status', async (_req: AuthenticatedRequest, res: Response, next: Ne
       },
       workers: {
         required: true,
-        queues: ['send-email', 'poll-inbox'],
+        queues: ['send-email (Gmail/SMTP)', 'poll-inbox (Gmail/IMAP)'],
       },
     });
   } catch (err) {

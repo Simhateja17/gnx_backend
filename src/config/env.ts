@@ -17,6 +17,10 @@ const envSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().trim().default(''),
   GOOGLE_REDIRECT_URI: z.string().default('http://localhost:5000/api/gmail/callback'),
 
+  // Required at runtime when a workspace saves a custom SMTP/IMAP connection.
+  // Generate with: openssl rand -hex 32
+  CREDENTIAL_ENCRYPTION_KEY: z.string().trim().default(''),
+
   // Public origin Retell's servers can reach to invoke our custom
   // function tools mid-call (check_availability, book_meeting, etc).
   // Must be a real internet-facing URL - localhost/tunnels won't work.

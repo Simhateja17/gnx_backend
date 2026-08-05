@@ -1,19 +1,8 @@
 import { google } from 'googleapis';
 import { supabase } from '../lib/supabase';
-import { enqueueSendEmail } from '../jobs/send-email.job';
-import { generateReply } from './ai.service';
-import { getNextStepNumber } from './email.service';
 import { AppError } from '../types';
 import { env } from '../config/env';
-
-const UNSUBSCRIBE_PATTERNS = [
-  /\bunsubscribe\b/i,
-  /\bstop emailing\b/i,
-  /\bremove me\b/i,
-  /\bopt out\b/i,
-  /\bdon'?t contact\b/i,
-  /\bdo not contact\b/i,
-];
+import { processInboundReply } from './reply-processing.service';
 
 function createOAuth2Client(accessToken: string, refreshToken: string) {
   const oauth2 = new google.auth.OAuth2(env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REDIRECT_URI);
@@ -21,13 +10,14 @@ function createOAuth2Client(accessToken: string, refreshToken: string) {
   return oauth2;
 }
 
-export async function pollInbox(organizationId: string, connectedAccountId: string) {
+export async function pollGmailInbox(organizationId: string, connectedAccountId: string) {
   const { data: account, error: accError } = await supabase
     .from('connected_accounts')
     .select('*')
     .eq('id', connectedAccountId)
     .eq('organization_id', organizationId)
     .eq('provider', 'gmail')
+    .eq('is_active', true)
     .single();
 
   if (accError || !account) throw new AppError(404, 'Connected Gmail account not found');
@@ -60,24 +50,34 @@ export async function pollInbox(organizationId: string, connectedAccountId: stri
   // slower as an org's tracked thread count grows. Fetched once here instead.
   const { data: existingReplies } = await supabase
     .from('email_replies')
-    .select('gmail_message_id')
+    .select('gmail_message_id,provider_message_id')
     .eq('organization_id', organizationId);
-  const knownIds = new Set((existingReplies ?? []).map(r => r.gmail_message_id));
+  const knownIds = new Set((existingReplies ?? [])
+    .flatMap(r => [r.gmail_message_id, r.provider_message_id])
+    .filter(Boolean));
 
   const { data: allOurMessages } = await supabase
     .from('email_messages')
-    .select('id, lead_id, campaign_id, subject, gmail_thread_id, gmail_message_id, created_at')
+    .select('id, lead_id, campaign_id, subject, gmail_thread_id, gmail_message_id, provider_thread_id, provider_message_id, created_at')
     .eq('organization_id', organizationId)
     .in('gmail_thread_id', threadIds)
     .order('created_at', { ascending: true });
 
   const ourIdsByThread = new Map<string, Set<string>>();
-  const originalMsgByThread = new Map<string, { id: string; lead_id: string; campaign_id: string | null; subject: string | null; gmail_thread_id: string | null }>();
+  const originalMsgByThread = new Map<string, {
+    id: string;
+    lead_id: string;
+    campaign_id: string | null;
+    subject: string | null;
+    gmail_thread_id: string | null;
+    provider_thread_id: string | null;
+  }>();
   for (const m of allOurMessages ?? []) {
     if (!m.gmail_thread_id) continue;
-    if (m.gmail_message_id) {
+    const providerMessageId = m.gmail_message_id ?? m.provider_message_id;
+    if (providerMessageId) {
       if (!ourIdsByThread.has(m.gmail_thread_id)) ourIdsByThread.set(m.gmail_thread_id, new Set());
-      ourIdsByThread.get(m.gmail_thread_id)!.add(m.gmail_message_id);
+      ourIdsByThread.get(m.gmail_thread_id)!.add(providerMessageId);
     }
     // Rows are ordered oldest-first, so the first one seen per thread is the original message.
     if (!originalMsgByThread.has(m.gmail_thread_id)) originalMsgByThread.set(m.gmail_thread_id, m);
@@ -98,43 +98,22 @@ export async function pollInbox(organizationId: string, connectedAccountId: stri
 
         const rawBody = extractPlainTextBody(message);
         if (!rawBody) continue;
-        const body = stripQuotedText(rawBody);
-        if (!body) continue;
-
         if (!originalMsg) continue;
-        const unsubscribed = isUnsubscribeReply(body);
+        const result = await processInboundReply({
+          organizationId,
+          emailMessageId: originalMsg.id,
+          leadId: originalMsg.lead_id,
+          campaignId: originalMsg.campaign_id,
+          subject: originalMsg.subject,
+          provider: 'gmail',
+          providerMessageId: msgId,
+          providerThreadId: originalMsg.provider_thread_id ?? originalMsg.gmail_thread_id,
+          body: rawBody,
+          receivedAt: new Date().toISOString(),
+          autoApproveReplies,
+        });
 
-        const { data: insertedReply, error: replyError } = await supabase
-          .from('email_replies')
-          .insert({
-            organization_id: organizationId,
-            email_message_id: originalMsg.id,
-            lead_id: originalMsg.lead_id,
-            body,
-            gmail_message_id: msgId,
-            ai_draft_status: unsubscribed ? 'rejected' : 'pending',
-            received_at: new Date().toISOString(),
-          })
-          .select('id')
-          .single();
-
-        if (replyError || !insertedReply) throw new AppError(500, 'Failed to save email reply', replyError);
-
-        await supabase
-          .from('leads')
-          .update({ status: unsubscribed ? 'unsubscribed' : 'engaged', updated_at: new Date().toISOString() })
-          .eq('id', originalMsg.lead_id);
-
-        if (!unsubscribed) {
-          await saveAiDraftReply({
-            organizationId,
-            emailReplyId: insertedReply.id,
-            originalMessage: originalMsg,
-            autoApproveReplies,
-          });
-        }
-
-        newReplies++;
+        if (result.processed) newReplies++;
       }
     } catch (err: any) {
       console.error(`[poll-inbox] Error processing thread ${threadId}:`, err.message);
@@ -142,87 +121,6 @@ export async function pollInbox(organizationId: string, connectedAccountId: stri
   }
 
   return { newReplies };
-}
-
-async function saveAiDraftReply(input: {
-  organizationId: string;
-  emailReplyId: string;
-  originalMessage: {
-    id: string;
-    lead_id: string;
-    campaign_id: string | null;
-    subject: string | null;
-    gmail_thread_id: string | null;
-  };
-  autoApproveReplies: boolean;
-}) {
-  const { organizationId, emailReplyId, originalMessage, autoApproveReplies } = input;
-  const generated = await generateReply(organizationId, { emailReplyId });
-
-  let replyMessageId: string | null = null;
-  if (autoApproveReplies) {
-    const subject = originalMessage.subject?.toLowerCase().startsWith('re:')
-      ? originalMessage.subject
-      : `Re: ${originalMessage.subject || 'Your message'}`;
-    const nextStepNumber = await getNextStepNumber(originalMessage.lead_id, originalMessage.campaign_id);
-
-    const { data: replyMessage, error: messageError } = await supabase
-      .from('email_messages')
-      .insert({
-        organization_id: organizationId,
-        campaign_id: originalMessage.campaign_id,
-        lead_id: originalMessage.lead_id,
-        step_number: nextStepNumber,
-        subject,
-        body: generated.body,
-        gmail_thread_id: originalMessage.gmail_thread_id,
-        status: 'queued',
-      })
-      .select('id')
-      .single();
-
-    if (messageError || !replyMessage) throw new AppError(500, 'Failed to queue approved AI reply', messageError);
-    replyMessageId = replyMessage.id;
-  }
-
-  await supabase
-    .from('email_replies')
-    .update({
-      ai_draft_reply: generated.body,
-      ai_draft_status: autoApproveReplies ? 'sent' : 'pending',
-    })
-    .eq('id', emailReplyId)
-    .eq('organization_id', organizationId);
-
-  if (replyMessageId) {
-    await enqueueSendEmail({
-      emailMessageId: replyMessageId,
-      organizationId,
-      campaignId: originalMessage.campaign_id ?? undefined,
-      leadId: originalMessage.lead_id,
-    }, {
-      jobId: `send-email-${replyMessageId}`,
-    });
-  }
-}
-
-function isUnsubscribeReply(body: string) {
-  return UNSUBSCRIBE_PATTERNS.some(pattern => pattern.test(body));
-}
-
-// Plain-text replies include the entire original message quoted below the
-// new text (lines starting with '>', preceded by an 'On ... wrote:' line).
-// Since every outbound email includes a CAN-SPAM 'reply "unsubscribe"'
-// footer, leaving the quote in would make isUnsubscribeReply (and the AI
-// reply-draft context) see that footer as if the prospect wrote it,
-// misreading every single reply as an unsubscribe request.
-function stripQuotedText(body: string): string {
-  const lines = body.split(/\r?\n/);
-  const quoteStartIndex = lines.findIndex(
-    line => /^>/.test(line.trim()) || /^On .+wrote:\s*$/.test(line.trim())
-  );
-  const kept = quoteStartIndex === -1 ? lines : lines.slice(0, quoteStartIndex);
-  return kept.join('\n').trim();
 }
 
 function extractPlainTextBody(message: any): string | null {

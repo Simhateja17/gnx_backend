@@ -113,10 +113,10 @@ export async function getDashboard(userId: string, orgId: string) {
       .maybeSingle(),
     supabase
       .from('connected_accounts')
-      .select('id, provider_account_id')
+      .select('id, provider, provider_account_id, is_active, updated_at')
       .eq('organization_id', orgId)
-      .eq('provider', 'gmail')
-      .maybeSingle(),
+      .in('provider', ['gmail', 'smtp'])
+      .order('updated_at', { ascending: false }),
     supabase
       .from('meetings')
       .select('id, title, scheduled_at, duration_minutes, attendee_phone, leads(name, first_name, last_name, title, company)')
@@ -143,7 +143,7 @@ export async function getDashboard(userId: string, orgId: string) {
     ['pending draft count', pendingDraftsResult.error],
     ['queued email count', queuedEmailsResult.error],
     ['agent configuration', agentResult.error],
-    ['Gmail connection', gmailResult.error],
+    ['Email connection', gmailResult.error],
     ['next meeting', nextMeetingResult.error],
   ] as const;
   const failedQuery = dashboardErrors.find(([, error]) => error);
@@ -218,10 +218,10 @@ export async function getDashboard(userId: string, orgId: string) {
   activity.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
 
   const tasks = [
-    ...(gmailResult.data ? [] : [{
-      type: 'gmail',
-      title: 'Connect Gmail',
-      detail: 'Required before campaigns can send real emails.',
+    ...((gmailResult.data ?? []).some((row: any) => row.is_active !== false) ? [] : [{
+      type: 'email',
+      title: 'Connect an email account',
+      detail: 'Connect Gmail or custom SMTP/IMAP before campaigns can send real emails.',
       actionLabel: 'Open settings',
       href: '/settings',
       priority: 'high',
