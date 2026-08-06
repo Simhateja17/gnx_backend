@@ -68,7 +68,15 @@ export async function signupStart(input: SignupStartInput) {
 
   const { error } = await supabaseAuth.auth.signInWithOtp({
     email: input.email,
-    options: { shouldCreateUser: true },
+    options: {
+      shouldCreateUser: true,
+      // signInWithOtp always renders Supabase's "Magic Link" email template,
+      // even for brand-new accounts - there's no separate signup template it
+      // switches to. This flag lets that template say "confirm your sign up"
+      // instead of "sign in" via {{ .Data.intent }} (see auth.service.ts login
+      // path for the matching "login" flag).
+      data: { intent: 'signup' },
+    },
   });
 
   if (error) {
@@ -143,7 +151,10 @@ export async function signupVerify(input: SignupVerifyInput) {
 export async function loginStart(input: LoginStartInput) {
   const { error } = await supabaseAuth.auth.signInWithOtp({
     email: input.email,
-    options: { shouldCreateUser: false },
+    options: {
+      shouldCreateUser: false,
+      data: { intent: 'login' },
+    },
   });
 
   if (error) {
