@@ -156,9 +156,15 @@ async function claimProvisioningRow(input: {
       .from('retell_phone_numbers')
       .update(record)
       .eq('id', existing.id)
+      .eq('status', existing.status)
+      .eq('updated_at', existing.updated_at)
       .select('*')
-      .single();
+      .maybeSingle();
     if (error) throw new AppError(500, 'Failed to resume Retell phone provisioning', error);
+    if (!data) {
+      // Lost the race to resume this row - another caller already claimed it.
+      return { row: await findProvisioningRow(input.provisioningKey), shouldProvision: false };
+    }
     return { row: data as ProvisioningRow, shouldProvision: true };
   }
 
@@ -287,6 +293,34 @@ export async function provisionIncludedRetellPhoneNumber(
   } catch (error: any) {
     await markProvisioningFailed(row.id, error);
     throw error instanceof AppError ? error : new AppError(502, `Retell phone purchase failed: ${error?.message ?? 'unknown error'}`, error);
+  }
+}
+
+// Records that an org is entitled to a number without purchasing one yet.
+// Used while auto-provisioning is switched off, so a manual admin action has
+// a row to find and no purchase attempt is silently lost.
+export async function ensurePhoneProvisioningRequested(organizationId: string): Promise<void> {
+  const entitlement = await loadEntitlement(organizationId);
+  if (!entitlement.eligible) return;
+
+  const provisioningKey = `${organizationId}:included:local:v1`;
+  const existing = await findProvisioningRow(provisioningKey);
+  if (existing) return;
+
+  const { error } = await supabase
+    .from('retell_phone_numbers')
+    .insert({
+      organization_id: organizationId,
+      agent_config_id: entitlement.agentConfig?.id ?? null,
+      country: entitlement.country,
+      number_type: 'local' as const,
+      entitlement_kind: 'included' as const,
+      entitlement_id: `plan:${entitlement.planId}:included-local-v1`,
+      provisioning_key: provisioningKey,
+      status: 'requested' as const,
+    });
+  if (error && !isUniqueViolation(error)) {
+    throw new AppError(500, 'Failed to record pending Retell phone provisioning', error);
   }
 }
 
