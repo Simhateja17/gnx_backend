@@ -425,7 +425,7 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
 
   const { data: msg, error: msgError } = await supabase
     .from('email_messages')
-    .select('*, leads(id, email, first_name, last_name, name, title, company, status), campaigns(status)')
+    .select('*, leads(id, email, first_name, last_name, name, title, company, status, do_not_email, email_unsubscribed, dnc_status, qualification_status), campaigns(status)')
     .eq('id', emailMessageId)
     .eq('organization_id', organizationId)
     .single();
@@ -456,6 +456,26 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
     throw new AppError(400, 'Lead has no email address');
   }
 
+  // Suppression, checked at the last possible moment. These flags were being
+  // written by Apollo enrichment and read by nothing, so a contact Apollo had
+  // already marked as unsubscribed could still be emailed. Enforced here
+  // rather than only at selection time because a lead can be suppressed by a
+  // reply that arrives after the message was queued.
+  if (msg.leads?.do_not_email === true || msg.leads?.email_unsubscribed === true) {
+    console.warn(`[send-email] Message ${emailMessageId} blocked: lead ${msg.lead_id} is suppressed`);
+    await markEmailSkipped(emailMessageId);
+    return { success: false, reason: 'lead_suppressed' };
+  }
+
+  // Approval. A draft has never been cleared by anyone - not by a human, and
+  // not by autopilot on this campaign's behalf - so it must not send. This is
+  // the gate that makes "no draft sends merely because it was generated" true
+  // in the one place it can actually be enforced.
+  if (msg.status === 'draft') {
+    console.warn(`[send-email] Message ${emailMessageId} blocked: still an unapproved draft`);
+    return { success: false, reason: 'not_approved' };
+  }
+
   const stepNumber = msg.step_number ?? 1;
   // Only genuine automated sequence steps (step 2/3 follow-ups) carry a
   // sequence_step_id - these two guards exist to stop those follow-ups once
@@ -473,29 +493,24 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
     return { success: false, reason: 'campaign_not_active', campaignStatus: msg.campaigns?.status };
   }
 
-  let subject = msg.subject;
-  let body = msg.body;
+  const subject = msg.subject;
+  const body = msg.body;
 
+  // Copy is written ahead of time by the generation pipeline, where it is
+  // validated (right recipient, no placeholders, no markup) before it is ever
+  // saved. Generating here instead would put unvalidated text straight onto
+  // the wire with nobody having read it, so an empty message is a failure to
+  // report rather than a gap to fill.
   if (!subject || !body) {
-    const campaignId = msg.campaign_id;
-    const leadId = msg.lead_id;
-
-    if (campaignId && leadId) {
-      console.log(`[send-email] Generating email copy for message ${emailMessageId}, campaign ${campaignId}, lead ${leadId}, step ${stepNumber}`);
-      const generated = await generateEmail(organizationId, { campaignId, leadId, stepNumber });
-      subject = subject || generated.subject;
-      body = body || generated.body;
-
-      await supabase
-        .from('email_messages')
-        .update({ subject, body, context_snapshot_id: generated.contextSnapshotId })
-        .eq('id', emailMessageId);
-    }
+    console.error(`[send-email] Message ${emailMessageId} has no generated copy; refusing to send`);
+    await markEmailFailed(emailMessageId, 'Message has no generated copy');
+    return { success: false, reason: 'not_generated' };
   }
 
-  if (!subject || !body) throw new AppError(400, 'Email has no subject or body and could not be generated');
-
-  body += UNSUBSCRIBE_FOOTER;
+  // The footer is appended at send time, never stored on the draft - the
+  // reviewer reads the email the prospect will read, minus the boilerplate the
+  // platform is responsible for.
+  const outgoingBody = body + UNSUBSCRIBE_FOOTER;
 
   const connection = await getActiveEmailConnection(organizationId);
   if (!connection || !connection.email) {
@@ -525,7 +540,7 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
         connection.email,
         toEmail,
         subject,
-        body,
+        outgoingBody,
         {
           threadId: parentThreadId,
           onTokenRefresh: (tokens) => {
@@ -555,7 +570,7 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
         displayName: smtpConnection.displayName,
         to: toEmail,
         subject,
-        text: body,
+        text: outgoingBody,
         inReplyTo: parentThreadId,
       });
 
@@ -635,6 +650,13 @@ async function markEmailSkipped(emailMessageId: string) {
   await supabase
     .from('email_messages')
     .update({ status: 'skipped' })
+    .eq('id', emailMessageId);
+}
+
+async function markEmailFailed(emailMessageId: string, reason: string) {
+  await supabase
+    .from('email_messages')
+    .update({ status: 'failed', error_message: reason })
     .eq('id', emailMessageId);
 }
 

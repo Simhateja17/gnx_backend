@@ -51,7 +51,12 @@ app.post('/webhooks/razorpay', webhookRateLimiter, express.raw({ type: 'applicat
 
 // Apollo does not provide a signed webhook header for phone/waterfall
 // enrichment. Require the account-owned secret before accepting the callback.
-app.post('/webhooks/apollo', webhookRateLimiter, express.json(), async (req, res) => {
+//
+// Two paths, one handler: /api/apollo/webhook is the documented contract, and
+// /webhooks/apollo is what already-configured Apollo callbacks point at.
+// Retiring the old path would strand enrichment results in flight, and the
+// handler is idempotent either way.
+app.post(['/webhooks/apollo', '/api/apollo/webhook'], webhookRateLimiter, express.json(), async (req, res) => {
   const configuredSecret = env.APOLLO_ENRICHMENT_WEBHOOK_SECRET;
   const querySecret = typeof req.query.secret === 'string' ? req.query.secret : '';
   const headerSecret = typeof req.headers['x-apollo-webhook-secret'] === 'string'

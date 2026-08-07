@@ -28,12 +28,40 @@ export const VOICE_DEFAULTS = {
 
 export const APOLLO_ENRICHMENT_CAP = 100;
 
-// Onboarding prepares a useful first campaign asynchronously. The target is
-// deliberately below the enrichment cap so there is room for retries and
-// later user-requested enrichment without exhausting the campaign allowance.
-export const ONBOARDING_ENRICHED_LEAD_TARGET = 50;
+// Onboarding prepares a useful first campaign asynchronously. Ten qualified
+// leads, not fifty: with verified-only qualification a smaller target is
+// reliably reachable, and ten leads across a three step sequence is thirty
+// drafts - a reviewable number for someone seeing the product for the first
+// time. Fifty was three times that and made the first run feel like work.
+export const ONBOARDING_ENRICHED_LEAD_TARGET = 10;
 export const ONBOARDING_APOLLO_MAX_SEARCH_PAGES = 5;
-export const ONBOARDING_APOLLO_MAX_CANDIDATES = 250;
+// Ten times the target. If a hundred verified candidates cannot yield ten
+// usable leads the ICP is wrong, and spending more credits will not fix it -
+// failing fast sends the customer back to their targeting instead.
+export const ONBOARDING_APOLLO_MAX_CANDIDATES = 100;
+
+// Apollo import pipeline.
+//
+// Batches of ten (Apollo's bulk_match ceiling) with three in flight at once,
+// refilled the moment any one finishes rather than in waves - a single slow
+// batch must not leave two slots idle.
+export const APOLLO_BULK_BATCH_SIZE = 10;
+export const APOLLO_BULK_CONCURRENCY = 3;
+
+// One clock for the whole import. Individual leads also have their own
+// deadline, but this is the backstop that guarantees an import can never sit
+// in a non-terminal state - the failure mode the customer experiences as a
+// progress bar that never finishes.
+export const APOLLO_IMPORT_TIMEOUT_MS = 10 * 60 * 1000;
+export const APOLLO_LEAD_ENRICHMENT_TIMEOUT_MS = 2 * 60 * 1000;
+
+// Generation is auto-triggered by leads becoming ready. Leads arrive in
+// bursts, so attachment schedules a job and further arrivals coalesce into it
+// instead of starting a run per lead.
+export const CAMPAIGN_GENERATION_DEBOUNCE_MS = 15_000;
+// Mirrors APOLLO_ENRICHMENT_CAP: no import, however large, can trigger
+// unbounded AI spend without someone asking for it.
+export const CAMPAIGN_GENERATION_LEAD_CAP = 100;
 
 // Guardrails for the AI agent's "get me N ICP leads" tool: never fetch more
 // than this many net-new leads in one request, and never make more than this

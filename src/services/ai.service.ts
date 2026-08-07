@@ -271,6 +271,176 @@ export async function generateEmail(orgId: string, input: GenerateEmailInput) {
   };
 }
 
+// ── Sequence generation (all steps in one call) ──────────────────
+
+export type SequenceStepRequest = {
+  stepNumber: number;
+  stepType: string;
+  instruction: string | null;
+};
+
+export type SequenceGenerationInput = {
+  campaign: Record<string, any>;
+  lead: Record<string, any>;
+  agentConfig: Record<string, any>;
+  steps: SequenceStepRequest[];
+  /** From context-readiness: exactly what Apollo has, and what it does not. */
+  facts: {
+    knownFacts: Record<string, string>;
+    unavailableFacts: string[];
+    contextScore: string;
+    thinContext: boolean;
+  };
+  previousEmails: Array<{ step_number?: number; subject: string; body: string }>;
+};
+
+/**
+ * The fact sheet.
+ *
+ * Naming the fields Apollo does NOT have is the part that does the work.
+ * Telling a model "do not invent facts" is weak; telling it "you do not know
+ * this company's industry" removes the temptation to reach for one. This is
+ * the single most effective guard against invented personalisation, and it is
+ * why context is scored before generation rather than after.
+ */
+function buildFactSheet(facts: SequenceGenerationInput['facts']): string {
+  const known = Object.entries(facts.knownFacts)
+    .map(([key, value]) => `- ${key}: ${value}`)
+    .join('\n');
+
+  const unavailable = facts.unavailableFacts.length > 0
+    ? facts.unavailableFacts.map(key => `- ${key}`).join('\n')
+    : '- (none)';
+
+  const thinNote = facts.thinContext
+    ? `\nCONTEXT IS THIN (${facts.contextScore}). Write a short, honest email based on role and company alone. Do NOT pad it with generic industry commentary to make it feel researched. A brief truthful email is better than a padded one.`
+    : '';
+
+  return `VERIFIED FACTS (the only facts you may state about this prospect or company):
+${known || '- (none)'}
+
+FACTS YOU DO NOT HAVE - never assert, imply, or guess at these:
+${unavailable}
+
+You may not claim the prospect posted, announced, launched, hired, raised funding, or discussed anything unless it appears in the verified list above.${thinNote}`;
+}
+
+function buildSequenceSystemPrompt(input: SequenceGenerationInput): string {
+  const { agentConfig, campaign, steps } = input;
+  const toneInstruction = getToneInstruction(agentConfig.tone);
+  const hookInstruction = getHookInstruction(agentConfig.hook_style);
+
+  const stepLines = steps.map(step => {
+    const instruction = step.instruction?.trim();
+    const fallback = step.stepNumber === 1
+      ? `First touch. Open with one factual detail from the verified list and invite a short conversation.${hookInstruction ? ` Opening line: ${hookInstruction}` : ''}`
+      : step.stepNumber === 2
+        ? 'Follow-up. Add one genuinely new angle. Do not restate the first email.'
+        : 'Final follow-up. Polite, low pressure, easy to decline without burning the bridge.';
+    return `- Step ${step.stepNumber} (${step.stepType}): ${instruction || fallback}`;
+  }).join('\n');
+
+  return `You are ${agentConfig.agent_name}, an AI sales agent writing a cold outreach sequence.
+
+PRODUCT: ${agentConfig.product_description}
+VALUE PROPOSITION: ${agentConfig.value_proposition}
+${agentConfig.pain_points ? `BUYER PAIN POINTS: ${agentConfig.pain_points}` : ''}
+${agentConfig.booking_link ? `BOOKING LINK: ${agentConfig.booking_link}` : ''}
+${formatPromptContextForPrompt(campaign.prompt_context)}
+
+TONE: ${toneInstruction}
+
+SEQUENCE TO WRITE:
+${stepLines}
+
+WRITING RULES:
+- Plain text only. No Markdown, no HTML, no bullet characters, no headings.
+- No placeholders of any kind. Every email must be ready to send as written.
+- Do not invent facts. Use only the verified facts supplied.
+- Use one strong verified detail; add a second only if it genuinely helps.
+- Each step must introduce a different angle. Never repeat a paragraph.
+- Low-friction call to action. No hype, no exaggerated claims, no guarantees.
+- Never mention research, data sources, enrichment, or how you found them.
+- No signature or unsubscribe footer - the application appends those.
+- Avoid em dashes.
+- Subject lines: four to six words, no "Subject:" prefix.
+- Let the body find its natural length. Clarity matters more than word count.
+
+Respond with JSON only, in exactly this shape:
+{"emails":[{"step":1,"subject":"...","body":"..."}]}
+Include one entry for every step listed above.`;
+}
+
+function buildSequenceUserPrompt(input: SequenceGenerationInput): string {
+  const { lead, facts, previousEmails } = input;
+
+  const firstName = (lead.first_name ?? '').trim();
+  const greetingRule = firstName
+    ? `Address the prospect as "${firstName}". Use no other name.`
+    : 'No reliable first name is available. Open WITHOUT a greeting name - do not guess one, and do not infer one from the email address.';
+
+  let prompt = `PROSPECT (this is the only person you are writing to):
+- First name: ${firstName || '(unknown)'}
+- Full name: ${lead.name || '(unknown)'}
+- Job title: ${lead.title || '(unknown)'}
+- Company: ${lead.company || '(unknown)'}
+
+${greetingRule}
+
+${buildFactSheet(facts)}`;
+
+  if (previousEmails.length > 0) {
+    prompt += '\n\nALREADY SENT IN THIS SEQUENCE (do not repeat these):';
+    for (const email of previousEmails) {
+      prompt += `\n---\nStep ${email.step_number ?? '?'} subject: ${email.subject}\n${email.body}`;
+    }
+  }
+
+  return prompt;
+}
+
+/**
+ * Generates every requested step in one model call and returns the raw
+ * response. Parsing, validation, and retry are the caller's job - they need to
+ * retry only the steps that failed while keeping the ones that passed.
+ */
+export async function generateSequenceRaw(input: SequenceGenerationInput): Promise<{
+  raw: string;
+  provider: string;
+  model: string;
+}> {
+  const systemPrompt = sanitizeText(buildSequenceSystemPrompt(input));
+  const userPrompt = sanitizeText(buildSequenceUserPrompt(input));
+
+  const raw = await withRetry(async () => {
+    const timeout = createTimeout();
+    try {
+      const completion = await openai.chat.completions.create({
+        model: env.AZURE_OPENAI_CHAT_DEPLOYMENT,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.7,
+        max_completion_tokens: 2048,
+      }, { signal: timeout.signal });
+
+      const content = completion.choices[0]?.message?.content;
+      if (!content) throw new AppError(502, 'No response from AI model');
+      return content;
+    } finally {
+      timeout.clear();
+    }
+  }, { label: 'generate-sequence' });
+
+  return {
+    raw,
+    provider: 'azure-openai',
+    model: env.AZURE_OPENAI_CHAT_DEPLOYMENT,
+  };
+}
+
 // ── Reply generation ─────────────────────────────────────────────
 
 function buildReplySystemPrompt(agentConfig: any, hasHistory: boolean): string {

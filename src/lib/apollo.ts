@@ -14,7 +14,16 @@ export type ApolloRequestContext = {
   enrichmentRunId?: string;
 };
 
-type ApolloOperation = 'people_search' | 'person_match' | 'organization_enrich' | 'organization_info';
+type ApolloOperation =
+  | 'people_search'
+  | 'person_match'
+  | 'bulk_person_match'
+  | 'organization_enrich'
+  | 'organization_bulk_enrich'
+  | 'organization_info';
+
+// Apollo caps bulk_match at 10 contacts per request.
+export const APOLLO_BULK_MATCH_MAX = 10;
 
 function compactContext(context: ApolloRequestContext) {
   return Object.fromEntries(
@@ -55,6 +64,32 @@ function summarizeRequest(operation: ApolloOperation, path: string, init: Reques
       locationCount: arrayLength(body.person_locations),
       companySizeCount: arrayLength(body.organization_num_employees_ranges),
       hasKeywords: hasValue(body.q_keywords),
+      emailStatuses: Array.isArray(body.contact_email_status)
+        ? body.contact_email_status
+        : undefined,
+    };
+  }
+
+  if (operation === 'bulk_person_match') {
+    const details = Array.isArray(body.details) ? body.details : [];
+    return {
+      method: init.method ?? 'GET',
+      endpoint: path.split('?')[0],
+      batchSize: details.length,
+      revealPersonalEmails: body.reveal_personal_emails === true,
+      revealPhoneNumber: body.reveal_phone_number === true,
+      waterfallEmail: body.run_waterfall_email === true,
+      waterfallPhone: body.run_waterfall_phone === true,
+      hasWebhook: hasValue(body.webhook_url),
+    };
+  }
+
+  if (operation === 'organization_bulk_enrich') {
+    const query = new URLSearchParams(path.split('?')[1] ?? '');
+    return {
+      method: init.method ?? 'GET',
+      endpoint: path.split('?')[0],
+      batchSize: query.getAll('domains[]').length,
     };
   }
 
@@ -112,6 +147,10 @@ function summarizeResponse(payload: ApolloApiResponse) {
   return {
     responseKeys: Object.keys(payload).slice(0, 20),
     peopleReturned: people?.length,
+    matchesReturned: Array.isArray(payload.matches) ? payload.matches.length : undefined,
+    organizationsReturned: Array.isArray(payload.organizations) ? payload.organizations.length : undefined,
+    missingRecords: typeof payload.missing_records === 'number' ? payload.missing_records : undefined,
+    creditsConsumed: typeof payload.credits_consumed === 'number' ? payload.credits_consumed : undefined,
     hasPerson: Boolean(payload.person),
     hasOrganization: Boolean(payload.organization),
     hasPagination: Boolean(payload.pagination),
@@ -241,6 +280,54 @@ export async function matchApolloPerson(
     method: 'POST',
     body: JSON.stringify(body),
   }, context);
+}
+
+/**
+ * Bulk person enrichment. One call covers up to ten contacts, replacing the
+ * same number of sequential /people/match calls - which is what made a ten
+ * lead import take twenty round trips and left later leads timing out while
+ * queued rather than while being enriched.
+ *
+ * `details` carries one identifier object per contact. Order is preserved in
+ * the `matches` array, and Apollo returns null in a slot it could not match,
+ * so callers must zip by index rather than assuming a dense result.
+ */
+export async function bulkMatchApolloPeople(
+  details: Array<Record<string, unknown>>,
+  options: Record<string, unknown> = {},
+  context: ApolloRequestContext = {},
+) {
+  if (details.length === 0) return { matches: [] } as ApolloApiResponse;
+  if (details.length > APOLLO_BULK_MATCH_MAX) {
+    throw new AppError(500, `Apollo bulk match accepts at most ${APOLLO_BULK_MATCH_MAX} contacts per request`);
+  }
+
+  return requestApollo('bulk_person_match', '/people/bulk_match', {
+    method: 'POST',
+    body: JSON.stringify({ ...options, details }),
+  }, context);
+}
+
+/**
+ * Bulk organization enrichment by domain. Apollo takes repeated `domains[]`
+ * query parameters rather than a JSON body here.
+ */
+export async function bulkEnrichApolloOrganizations(
+  domains: string[],
+  context: ApolloRequestContext = {},
+) {
+  const unique = [...new Set(domains.filter(domain => domain.trim().length > 0))];
+  if (unique.length === 0) return { organizations: [] } as ApolloApiResponse;
+
+  const query = new URLSearchParams();
+  for (const domain of unique) query.append('domains[]', domain);
+
+  return requestApollo(
+    'organization_bulk_enrich',
+    `/organizations/bulk_enrich?${query.toString()}`,
+    { method: 'GET' },
+    context,
+  );
 }
 
 export async function enrichApolloOrganization(

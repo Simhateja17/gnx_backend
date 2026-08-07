@@ -4,9 +4,15 @@ import {
   enrichApolloOrganization,
   getApolloOrganization,
 } from '../lib/apollo';
+import { normalizeApolloDomain } from '../lib/apollo-domain';
 import type { ApolloRequestContext } from '../lib/apollo';
 import { supabase } from '../lib/supabase';
 import { AppError } from '../types';
+import {
+  buildBulkMatchDetail,
+  buildBulkMatchOptions,
+  waterfallRequested,
+} from './apollo-request.service';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -117,7 +123,9 @@ export type ApolloLeadCurrent = JsonRecord & {
 export type ApolloRunKind =
   | 'people_search'
   | 'person_match'
+  | 'bulk_person_match'
   | 'organization_enrich'
+  | 'organization_bulk_enrich'
   | 'organization_info'
   | 'phone_waterfall';
 
@@ -146,17 +154,10 @@ function asStringArray(value: unknown): string[] {
   return asArray(value).map(item => firstString(item)).filter(Boolean) as string[];
 }
 
-export function normalizeApolloDomain(value: unknown): string | null {
-  const raw = firstString(value);
-  if (!raw) return null;
-
-  try {
-    const url = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`);
-    return url.hostname.toLowerCase().replace(/^www\./, '');
-  } catch {
-    return raw.toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0] || null;
-  }
-}
+// Re-exported so existing importers keep working. The implementation lives in
+// lib/apollo-domain so both request builders can share it without importing
+// each other, and so it survives tests that mock the HTTP client wholesale.
+export { normalizeApolloDomain };
 
 function unwrapOrganization(payload: unknown): JsonRecord | null {
   const record = asRecord(payload);
@@ -598,41 +599,17 @@ export function buildApolloPersonMatchRequest(input: {
   domain?: string | null;
   linkedinUrl?: string | null;
 }) {
-  const body: JsonRecord = {};
-  if (input.apolloId) body.id = input.apolloId;
-  if (input.email) body.email = input.email;
-  if (input.name) body.name = input.name;
-  if (input.firstName) body.first_name = input.firstName;
-  if (input.lastName) body.last_name = input.lastName;
-  if (input.company) body.organization_name = input.company;
-  if (input.domain) body.domain = normalizeApolloDomain(input.domain);
-  if (input.linkedinUrl) body.linkedin_url = input.linkedinUrl;
-
-  if (env.APOLLO_REVEAL_PERSONAL_EMAILS) body.reveal_personal_emails = true;
-
-  const needsWebhook = env.APOLLO_REVEAL_PHONE_NUMBER
-    || env.APOLLO_RUN_WATERFALL_EMAIL
-    || env.APOLLO_RUN_WATERFALL_PHONE;
-  if (needsWebhook && !env.APOLLO_ENRICHMENT_WEBHOOK_URL) {
-    throw new AppError(503, 'Apollo phone or waterfall enrichment requires APOLLO_ENRICHMENT_WEBHOOK_URL');
-  }
-  if (needsWebhook && !env.APOLLO_ENRICHMENT_WEBHOOK_SECRET) {
-    throw new AppError(503, 'Apollo phone or waterfall enrichment requires APOLLO_ENRICHMENT_WEBHOOK_SECRET');
-  }
-  if (env.APOLLO_REVEAL_PHONE_NUMBER) body.reveal_phone_number = true;
-  if (env.APOLLO_RUN_WATERFALL_EMAIL) body.run_waterfall_email = true;
-  if (env.APOLLO_RUN_WATERFALL_PHONE) body.run_waterfall_phone = true;
-  if (needsWebhook && env.APOLLO_ENRICHMENT_WEBHOOK_URL) {
-    const webhookUrl = new URL(env.APOLLO_ENRICHMENT_WEBHOOK_URL);
-    webhookUrl.searchParams.set('secret', env.APOLLO_ENRICHMENT_WEBHOOK_SECRET);
-    body.webhook_url = webhookUrl.toString();
-  }
-
-  return body;
+  // Identifiers and request options come from the same builders the bulk path
+  // uses, so a change to the waterfall or webhook contract cannot apply to one
+  // path and silently miss the other.
+  return {
+    ...buildBulkMatchDetail(input),
+    ...buildBulkMatchOptions(),
+  };
 }
 
 export function apolloWebhookExpected() {
-  return env.APOLLO_REVEAL_PHONE_NUMBER || env.APOLLO_RUN_WATERFALL_EMAIL || env.APOLLO_RUN_WATERFALL_PHONE;
+  return waterfallRequested();
 }
 
 export function hashApolloPayload(value: unknown) {

@@ -24,6 +24,7 @@ export const SETUP_STEP_IDS = [
   'retell',
   'leads',
   'campaign',
+  'review_drafts',
   'launch',
 ] as const;
 
@@ -82,7 +83,8 @@ const STEP_DEPENDENCIES: Record<SetupStepId, SetupStepId[]> = {
   retell: [],
   leads: [],
   campaign: ['leads'],
-  launch: ['campaign'],
+  review_drafts: ['campaign'],
+  launch: ['review_drafts'],
 };
 
 // ---------------------------------------------------------------------------
@@ -398,7 +400,7 @@ export function summarizeSteps(steps: SetupStep[]): SetupSummary {
 }
 
 export async function getSetupState(organizationId: string): Promise<SetupState> {
-  const [progress, integrations, agentConfigResult, leadsResult, campaignsResult, activeCampaignsResult] =
+  const [progress, integrations, agentConfigResult, leadsResult, campaignsResult, activeCampaignsResult, messagesResult] =
     await Promise.all([
       loadProgressRow(organizationId),
       getIntegrationStates(organizationId),
@@ -420,12 +422,25 @@ export async function getSetupState(organizationId: string): Promise<SetupState>
         .select('id', { count: 'exact', head: true })
         .eq('organization_id', organizationId)
         .eq('status', 'active'),
+      // Approval state. One approved email completes the step: the point is
+      // that the customer has read what the agent writes, and autopilot exists
+      // precisely so they need not approve all thirty by hand.
+      supabase
+        .from('email_messages')
+        .select('status')
+        .eq('organization_id', organizationId)
+        .in('status', ['draft', 'approved', 'queued', 'sent']),
     ]);
 
   const config = (agentConfigResult.data ?? null) as AgentConfigRow | null;
   const leadCount = leadsResult.count ?? 0;
   const campaignCount = campaignsResult.count ?? 0;
   const activeCampaignCount = activeCampaignsResult.count ?? 0;
+  const messageRows = messagesResult.data ?? [];
+  const approvedMessageCount = messageRows.filter(
+    row => row.status === 'approved' || row.status === 'queued' || row.status === 'sent',
+  ).length;
+  const draftMessageCount = messageRows.filter(row => row.status === 'draft').length;
 
   const derived: Record<SetupStepId, { status: SetupStepStatus; detail: string }> = {
     profile: isFilled(config?.first_name) && isFilled(config?.company)
@@ -480,6 +495,21 @@ export async function getSetupState(organizationId: string): Promise<SetupState>
     campaign: campaignCount > 0
       ? { status: 'complete', detail: `${campaignCount} campaign${campaignCount === 1 ? '' : 's'} created.` }
       : { status: 'incomplete', detail: 'Build your first campaign with the Setup Copilot.' },
+
+    review_drafts: approvedMessageCount > 0
+      ? {
+          status: 'complete',
+          detail: `${approvedMessageCount} email${approvedMessageCount === 1 ? '' : 's'} approved and ready to send.`,
+        }
+      : draftMessageCount > 0
+        ? {
+            status: 'incomplete',
+            detail: `${draftMessageCount} draft${draftMessageCount === 1 ? '' : 's'} waiting for review. Approve one, or turn on autopilot to approve them all.`,
+          }
+        : {
+            status: 'incomplete',
+            detail: 'Emails are written automatically once your leads finish enriching.',
+          },
 
     launch: activeCampaignCount > 0
       ? { status: 'complete', detail: `${activeCampaignCount} campaign${activeCampaignCount === 1 ? '' : 's'} running.` }

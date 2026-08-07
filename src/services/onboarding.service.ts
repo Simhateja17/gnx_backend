@@ -207,7 +207,9 @@ async function prepareInitialCampaign(
         reused: 0,
         skippedDuplicates: 0,
         failed: 0,
+        rejected: 0,
         searchPages: 0,
+        importRunId: null,
         error: null,
         updatedAt: new Date().toISOString(),
       };

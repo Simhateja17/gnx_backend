@@ -42,6 +42,28 @@ export const sequenceStepsUpsertSchema = z.object({
   steps: z.array(sequenceStepSchema).min(1).max(10),
 });
 
+/**
+ * Approving with no ids means "approve every draft in this campaign" - the
+ * Approve all action the first-run review screen leads with, since a first
+ * campaign carries thirty drafts and approving them one at a time is not a
+ * reasonable ask.
+ */
+export const approveMessagesSchema = z.object({
+  messageIds: z.array(z.string().uuid()).max(500).optional(),
+});
+
+export const autopilotSchema = z.object({
+  enabled: z.boolean(),
+});
+
+export const messageEditSchema = z.object({
+  subject: z.string().trim().min(1).max(200).optional(),
+  body: z.string().trim().min(1).max(10_000).optional(),
+}).refine(
+  value => value.subject !== undefined || value.body !== undefined,
+  { message: 'Provide a subject or a body to update' },
+);
+
 export const assignLeadsSchema = z.object({
   leadIds: z.array(z.string().uuid()).min(1).max(500),
 });
