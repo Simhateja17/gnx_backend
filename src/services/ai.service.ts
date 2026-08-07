@@ -414,10 +414,16 @@ export async function generateVoicePrompt(orgId: string, input: GenerateVoicePro
   const agentConfig = await ensureAgentConfig(orgId);
 
   let campaignContext = '';
+  let productDescription = agentConfig.product_description;
+  let valueProposition = agentConfig.value_proposition;
+  let painPoints = agentConfig.pain_points;
+  let tone = agentConfig.tone;
+  let objections = agentConfig.objections;
+
   if (input.campaignId) {
     const campaignResult = await supabase
       .from('campaigns')
-      .select('prompt_context')
+      .select('prompt_context, product_description, value_proposition, pain_points, tone, objections')
       .eq('id', input.campaignId)
       .eq('organization_id', orgId)
       .single();
@@ -426,9 +432,14 @@ export async function generateVoicePrompt(orgId: string, input: GenerateVoicePro
       bullet: '- ',
       labels: 'title',
     });
+    productDescription = campaignResult.data.product_description ?? productDescription;
+    valueProposition = campaignResult.data.value_proposition ?? valueProposition;
+    painPoints = campaignResult.data.pain_points ?? painPoints;
+    tone = campaignResult.data.tone ?? tone;
+    objections = campaignResult.data.objections ?? objections;
   }
 
-  const toneInstruction = getToneInstruction(agentConfig.tone);
+  const toneInstruction = getToneInstruction(tone);
 
   const prompt = `You are ${agentConfig.agent_name}, an AI sales agent making outbound phone calls.
 
@@ -439,9 +450,10 @@ COMPLIANCE - YOU MUST FOLLOW THESE RULES:
 4. If the prospect asks you to stop calling or remove them, acknowledge immediately and end the call politely.
 
 ABOUT YOU:
-- Product: ${agentConfig.product_description}
-- Value Proposition: ${agentConfig.value_proposition}
-${agentConfig.pain_points ? `- Buyer Pain Points to Address: ${agentConfig.pain_points}` : ''}
+- Product: ${productDescription}
+- Value Proposition: ${valueProposition}
+${painPoints ? `- Buyer Pain Points to Address: ${painPoints}` : ''}
+${objections ? `- Common Objections to Handle: ${objections}` : ''}
 ${campaignContext}
 
 TONE: ${toneInstruction}

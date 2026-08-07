@@ -189,6 +189,57 @@ export async function createOrUpdateRetellAgent(organizationId: string) {
   return { agentId: agentConfig.retell_agent_id };
 }
 
+// Each voice/both-channel campaign gets its own Retell agent + LLM, so
+// campaigns with different pitches/objections don't share one conversation
+// flow. Deliberately does not call bindActiveRetellPhoneNumbers: that binds
+// the org's shared number's *default* inbound/outbound agent, which must
+// stay pointed at the org-level agent - calls select their agent per-call
+// via override_agent_id instead (see scheduleCall below).
+export async function createOrUpdateRetellAgentForCampaign(organizationId: string, campaignId: string) {
+  const { data: campaign, error } = await supabase
+    .from('campaigns')
+    .select('id, name, retell_agent_id, retell_llm_id')
+    .eq('id', campaignId)
+    .eq('organization_id', organizationId)
+    .single();
+  if (error || !campaign) throw new AppError(404, 'Campaign not found');
+
+  const { prompt } = await generateVoicePrompt(organizationId, { campaignId });
+  const tools = [...GENERAL_TOOLS, ...buildMeetingTools()];
+
+  if (!campaign.retell_agent_id) {
+    const llm = await retell.llm.create({ general_prompt: prompt ?? '', general_tools: tools }).catch((err: any) => {
+      throw new AppError(502, `Failed to create Retell LLM: ${err.message}`);
+    });
+    const agent = await retell.agent.create({
+      agent_name: campaign.name,
+      response_engine: { type: 'retell-llm', llm_id: llm.llm_id },
+      voice_id: DEFAULT_VOICE_ID,
+      post_call_analysis_data: POST_CALL_ANALYSIS_DATA,
+    }).catch((err: any) => {
+      throw new AppError(502, `Failed to create Retell agent: ${err.message}`);
+    });
+
+    await supabase
+      .from('campaigns')
+      .update({ retell_agent_id: agent.agent_id, retell_llm_id: llm.llm_id })
+      .eq('id', campaignId);
+
+    return { agentId: agent.agent_id };
+  }
+
+  await retell.llm.update(campaign.retell_llm_id!, { general_prompt: prompt ?? '', general_tools: tools }).catch((err: any) => {
+    throw new AppError(502, `Failed to update Retell LLM: ${err.message}`);
+  });
+  await retell.agent.update(campaign.retell_agent_id, {
+    post_call_analysis_data: POST_CALL_ANALYSIS_DATA,
+  }).catch((err: any) => {
+    throw new AppError(502, `Failed to update Retell agent: ${err.message}`);
+  });
+
+  return { agentId: campaign.retell_agent_id };
+}
+
 // Retrieve llm_id from Retell when it's missing from our DB (edge case for old records)
 async function resolveLlmId(agentId: string, organizationId: string): Promise<string> {
   const agent = await retell.agent.retrieve(agentId).catch((err: any) => {
@@ -226,8 +277,18 @@ export async function scheduleCall(
     .eq('organization_id', organizationId)
     .single();
 
-  if (!agentConfig?.retell_agent_id) {
-    throw new AppError(400, 'No Retell agent configured for this organization');
+  const { data: campaignRow } = await supabase
+    .from('campaigns')
+    .select('retell_agent_id')
+    .eq('id', campaignId)
+    .eq('organization_id', organizationId)
+    .maybeSingle();
+
+  // Campaigns launched before per-campaign agents shipped fall back to the
+  // org's shared agent.
+  const agentId = campaignRow?.retell_agent_id ?? agentConfig?.retell_agent_id;
+  if (!agentId) {
+    throw new AppError(400, 'No Retell agent configured for this campaign');
   }
 
   const { data: lead } = await supabase
@@ -267,7 +328,7 @@ export async function scheduleCall(
     const call = await retell.call.createPhoneCall({
       from_number: fromNumber,
       to_number: toNumber,
-      override_agent_id: agentConfig.retell_agent_id,
+      override_agent_id: agentId,
       retell_llm_dynamic_variables: contextSnapshotToDynamicVariables(contextSnapshot, lead),
     });
 

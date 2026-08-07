@@ -7,6 +7,7 @@ import { ensureAgentConfig } from './agent-config.service';
 import { parsePromptContext, serializePromptContext } from '../lib/prompt-context';
 import type { AssignLeadsInput, CampaignCreateInput, CampaignUpdateInput, SequenceStepsUpsertInput } from '../schemas/campaigns.schema';
 import { normalizePhoneForCalling } from '../lib/phone';
+import { createOrUpdateRetellAgentForCampaign } from './voice.service';
 
 type CampaignChannel = 'email' | 'voice' | 'both';
 
@@ -29,6 +30,14 @@ type CampaignRow = {
   status: 'draft' | 'active' | 'paused' | 'completed';
   agent_config_id: string | null;
   prompt_context: string | null;
+  retell_agent_id: string | null;
+  retell_llm_id: string | null;
+  product_description: string | null;
+  value_proposition: string | null;
+  objections: string | null;
+  pain_points: string | null;
+  tone: string | null;
+  hook_style: string | null;
   max_leads: number;
   daily_send_cap: number;
   call_cadence_per_hour: number;
@@ -64,6 +73,14 @@ const CAMPAIGN_COLUMNS = [
   'status',
   'agent_config_id',
   'prompt_context',
+  'retell_agent_id',
+  'retell_llm_id',
+  'product_description',
+  'value_proposition',
+  'objections',
+  'pain_points',
+  'tone',
+  'hook_style',
   'max_leads',
   'daily_send_cap',
   'call_cadence_per_hour',
@@ -85,6 +102,12 @@ function toApiCampaign(row: CampaignRow, stats?: CampaignStats) {
     status: row.status,
     icpSource: prompt.icpSource,
     promptNotes: prompt.promptNotes,
+    productDescription: row.product_description,
+    valueProposition: row.value_proposition,
+    objections: row.objections,
+    painPoints: row.pain_points,
+    tone: row.tone,
+    hookStyle: row.hook_style,
     maxLeads: row.max_leads,
     dailySendCap: row.daily_send_cap,
     callCadencePerHour: row.call_cadence_per_hour,
@@ -96,11 +119,6 @@ function toApiCampaign(row: CampaignRow, stats?: CampaignStats) {
     updatedAt: row.updated_at,
     stats: stats ?? { enrolled: 0, ready: 0, missingEmail: 0, stopped: 0, queued: 0, sent: 0, meetings: 0 },
   };
-}
-
-async function getDefaultAgentConfigId(orgId: string) {
-  const config = await ensureAgentConfig(orgId);
-  return config.id;
 }
 
 async function getStatsByCampaign(orgId: string, campaignIds: string[]) {
@@ -187,14 +205,22 @@ export async function listCampaigns(orgId: string) {
 }
 
 export async function createCampaign(orgId: string, input: CampaignCreateInput) {
-  const agentConfigId = await getDefaultAgentConfigId(orgId);
+  const agentConfig = await ensureAgentConfig(orgId);
   const record = {
     organization_id: orgId,
     name: input.name,
     channel: input.channel,
     status: 'draft',
-    agent_config_id: agentConfigId,
+    agent_config_id: agentConfig.id,
     prompt_context: serializePromptContext(input),
+    // A new campaign starts pre-filled with the org's current pitch and can
+    // diverge from there once it has its own Retell agent.
+    product_description: input.productDescription ?? agentConfig.product_description,
+    value_proposition: input.valueProposition ?? agentConfig.value_proposition,
+    objections: input.objections ?? agentConfig.objections,
+    pain_points: input.painPoints ?? agentConfig.pain_points,
+    tone: input.tone ?? agentConfig.tone,
+    hook_style: input.hookStyle ?? agentConfig.hook_style,
     max_leads: input.maxLeads,
     daily_send_cap: input.dailySendCap,
     call_cadence_per_hour: input.callCadencePerHour,
@@ -252,6 +278,13 @@ export async function updateCampaign(orgId: string, id: string, input: CampaignU
       promptNotes: input.promptNotes ?? current.promptNotes,
     });
   }
+
+  if (input.productDescription !== undefined) record.product_description = input.productDescription;
+  if (input.valueProposition !== undefined) record.value_proposition = input.valueProposition;
+  if (input.objections !== undefined) record.objections = input.objections;
+  if (input.painPoints !== undefined) record.pain_points = input.painPoints;
+  if (input.tone !== undefined) record.tone = input.tone;
+  if (input.hookStyle !== undefined) record.hook_style = input.hookStyle;
 
   const { data, error } = await supabase
     .from('campaigns')
@@ -339,6 +372,10 @@ export async function setCampaignStatus(
       }
 
       if (voiceEnabled) {
+        // Give this campaign its own Retell agent/LLM before dialing anything.
+        // Any failure here is caught below, which rolls the campaign back to
+        // 'paused' instead of leaving it 'active' with no working agent.
+        await createOrUpdateRetellAgentForCampaign(orgId, id);
         const result = await enqueueVoiceCalls(orgId, id, campaign);
         voiceQueued = result.queued;
         voiceSkipped = result.skipped;
