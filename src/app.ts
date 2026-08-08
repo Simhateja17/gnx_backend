@@ -5,12 +5,14 @@ import cookieParser from 'cookie-parser';
 import * as Sentry from '@sentry/node';
 import { env } from './config/env';
 import { errorHandler } from './middleware/error.middleware';
-import { rateLimiter, webhookRateLimiter } from './middleware/rate-limit.middleware';
+import { rateLimiter, retellInboundRateLimiter, retellToolRateLimiter, webhookRateLimiter } from './middleware/rate-limit.middleware';
 import routes from './routes';
 import * as voiceService from './services/voice.service';
 import * as billingService from './services/billing.service';
 import { handleApolloWebhook } from './services/apollo-webhook.service';
 import { handleRetellTool } from './services/retell-tools.service';
+import { handleInboundRetellWebhook } from './services/inbound-voice.service';
+import { verifyRetellRequest, verifyRetellToolSecret } from './services/retell-auth.service';
 
 export const app = express();
 
@@ -35,7 +37,18 @@ app.post('/webhooks/retell', webhookRateLimiter, express.raw({ type: 'applicatio
     await voiceService.handleRetellWebhook(req.body as Buffer, req.headers['x-retell-signature'] as string ?? '');
     res.json({ received: true });
   } catch (err: any) {
-    res.status(err.statusCode ?? 500).json({ error: err.message });
+    res.status(err.status ?? err.statusCode ?? 500).json({ error: err.message });
+  }
+});
+
+// Pre-connect inbound routing. Retell waits for this signed response before
+// connecting an agent, so keep the handler raw, bounded, and independent from
+// browser/session authentication.
+app.post('/webhooks/retell/inbound', retellInboundRateLimiter, express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    res.json(await handleInboundRetellWebhook(req.body as Buffer, req.headers['x-retell-signature'] as string ?? ''));
+  } catch (err: any) {
+    res.status(err.statusCode ?? err.status ?? 500).json({ error: err.message });
   }
 });
 
@@ -74,21 +87,16 @@ app.post(['/webhooks/apollo', '/api/apollo/webhook'], webhookRateLimiter, expres
   }
 });
 
-// Retell custom-function tools - invoked live, mid-call, by Retell's
-// servers (not the browser), so this is secret-header authenticated rather
-// than session authenticated, same pattern as the Apollo webhook above.
-app.post('/webhooks/retell/tools/:toolName', webhookRateLimiter, express.json(), async (req, res) => {
-  const configuredSecret = env.RETELL_TOOL_SECRET;
-  const headerSecret = typeof req.headers['x-tool-secret'] === 'string' ? req.headers['x-tool-secret'] : '';
-  if (!configuredSecret || headerSecret !== configuredSecret) {
-    res.status(401).json({ error: 'Invalid tool secret' });
-    return;
-  }
-
+// Retell tools require both Retell's signature and our private static header.
+// Raw bytes are mandatory because parsing/re-serializing JSON changes the HMAC.
+app.post('/webhooks/retell/tools/:toolName', retellToolRateLimiter, express.raw({ type: 'application/json' }), async (req, res) => {
   try {
-    res.json(await handleRetellTool(req.params.toolName, req.body));
+    const rawBody = req.body as Buffer;
+    verifyRetellRequest(rawBody, req.headers['x-retell-signature'] as string ?? '');
+    verifyRetellToolSecret(typeof req.headers['x-tool-secret'] === 'string' ? req.headers['x-tool-secret'] : '');
+    res.json(await handleRetellTool(req.params.toolName, JSON.parse(rawBody.toString('utf8'))));
   } catch (err: any) {
-    res.status(err.status ?? 500).json({ error: err.message });
+    res.status(err.statusCode ?? err.status ?? 500).json({ error: err.message });
   }
 });
 

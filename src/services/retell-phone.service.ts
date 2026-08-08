@@ -42,7 +42,7 @@ type RetellWeightedAgent = {
   agent_version: 'latest_published';
 };
 
-export function buildRetellPhoneAgentBindings(agentId: string) {
+export function buildRetellOutboundPhoneAgentBinding(agentId: string) {
   const binding: RetellWeightedAgent = {
     agent_id: agentId,
     weight: 1,
@@ -50,8 +50,19 @@ export function buildRetellPhoneAgentBindings(agentId: string) {
   };
 
   return {
-    inbound_agents: [binding],
-    outbound_agents: [{ ...binding }],
+    outbound_agents: [binding],
+  } as const;
+}
+
+export function buildRetellInboundPhoneSettings(enabled: boolean) {
+  return {
+    // Inbound calls are always selected explicitly by the signed inbound
+    // webhook. Leaving a default agent unset makes provider/webhook outages
+    // fail closed instead of silently connecting the outbound prompt.
+    inbound_agents: null,
+    inbound_webhook_url: enabled
+      ? `${env.BACKEND_PUBLIC_URL}/webhooks/retell/inbound`
+      : null,
   } as const;
 }
 
@@ -63,7 +74,8 @@ export function buildIncludedPhonePurchaseRequest(input: {
   return {
     country_code: input.country,
     toll_free: false,
-    ...(input.agentId ? buildRetellPhoneAgentBindings(input.agentId) : {}),
+    ...(input.agentId ? buildRetellOutboundPhoneAgentBinding(input.agentId) : {}),
+    ...buildRetellInboundPhoneSettings(false),
     nickname: `${input.organizationName} included number`,
   } as const;
 }
@@ -334,7 +346,7 @@ export async function listRetellPhoneNumbers(organizationId: string) {
   return data ?? [];
 }
 
-export async function bindActiveRetellPhoneNumbers(organizationId: string, agentId: string) {
+export async function bindActiveRetellOutboundPhoneNumbers(organizationId: string, agentId: string) {
   const { data: rows, error } = await supabase
     .from('retell_phone_numbers')
     .select('id,phone_number')
@@ -349,10 +361,9 @@ export async function bindActiveRetellPhoneNumbers(organizationId: string, agent
       // Keep rebinding on the same current Retell API contract as purchase.
       const updated = await retell.phoneNumber.update(
         row.phone_number,
-        buildRetellPhoneAgentBindings(agentId) as any,
+        buildRetellOutboundPhoneAgentBinding(agentId) as any,
       );
       await supabase.from('retell_phone_numbers').update({
-        inbound_agent_id: agentId,
         outbound_agent_id: agentId,
         provider_metadata: updated,
         last_reconciled_at: new Date().toISOString(),
@@ -361,5 +372,38 @@ export async function bindActiveRetellPhoneNumbers(organizationId: string, agent
     } catch (bindingError: any) {
       console.warn(`[retell] Failed to bind ${row.phone_number} to agent ${agentId}:`, bindingError?.message ?? bindingError);
     }
+  }
+}
+
+export async function configureActiveRetellInboundPhoneNumbers(
+  organizationId: string,
+  enabled: boolean,
+) {
+  const { data: rows, error } = await supabase
+    .from('retell_phone_numbers')
+    .select('id,phone_number')
+    .eq('organization_id', organizationId)
+    .eq('status', 'active')
+    .not('phone_number', 'is', null);
+  if (error) throw new AppError(500, 'Failed to load active Retell numbers for inbound configuration', error);
+  if (!rows?.length) {
+    if (!enabled) return;
+    throw new AppError(400, 'Provision an active Retell phone number before enabling inbound calls');
+  }
+
+  const settings = buildRetellInboundPhoneSettings(enabled);
+  for (const row of rows) {
+    if (!row.phone_number) continue;
+    const updated = await retell.phoneNumber.update(row.phone_number, settings as any).catch((bindingError: any) => {
+      throw new AppError(502, `Failed to ${enabled ? 'enable' : 'disable'} inbound calls: ${bindingError?.message ?? 'Retell update failed'}`);
+    });
+    const { error: updateError } = await supabase.from('retell_phone_numbers').update({
+      inbound_agent_id: null,
+      inbound_webhook_url: settings.inbound_webhook_url,
+      provider_metadata: updated,
+      last_reconciled_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }).eq('id', row.id);
+    if (updateError) throw new AppError(500, 'Retell inbound configuration changed but could not be saved', updateError);
   }
 }

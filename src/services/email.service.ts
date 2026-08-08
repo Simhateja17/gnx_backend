@@ -425,7 +425,7 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
 
   const { data: msg, error: msgError } = await supabase
     .from('email_messages')
-    .select('*, leads(id, email, first_name, last_name, name, title, company, status, do_not_email, email_unsubscribed, dnc_status, qualification_status), campaigns(status)')
+    .select('*, leads(id, email, first_name, last_name, name, title, company, status, do_not_email, email_unsubscribed, dnc_status, qualification_status, outbound_paused_at, outbound_pause_reason, outbound_resume_at), campaigns(status)')
     .eq('id', emailMessageId)
     .eq('organization_id', organizationId)
     .single();
@@ -486,6 +486,27 @@ export async function sendEmail(emailMessageId: string, organizationId: string) 
   if (msg.sequence_step_id && STOP_SEQUENCE_STATUSES.includes(msg.leads?.status)) {
     await markEmailSkipped(emailMessageId);
     return { success: false, reason: 'sequence_stopped', leadStatus: msg.leads?.status };
+  }
+
+  if (msg.sequence_step_id && msg.leads?.outbound_paused_at) {
+    const resumeAt = msg.leads.outbound_resume_at ? new Date(msg.leads.outbound_resume_at).getTime() : null;
+    if (!resumeAt || resumeAt > Date.now()) {
+      const delayMs = resumeAt ? Math.max(1_000, resumeAt - Date.now()) : 5 * 60 * 1000;
+      await enqueueSendEmail({
+        emailMessageId,
+        organizationId,
+        leadId: msg.lead_id,
+        campaignId: msg.campaign_id,
+        stepNumber,
+      }, { delay: delayMs });
+      return { success: false, reason: 'outbound_paused_for_inbound', requeued: true, delayMs };
+    }
+    await supabase.from('leads').update({
+      outbound_paused_at: null,
+      outbound_pause_reason: null,
+      outbound_resume_at: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', msg.lead_id).eq('organization_id', organizationId);
   }
 
   if (msg.sequence_step_id && msg.campaigns?.status !== 'active') {

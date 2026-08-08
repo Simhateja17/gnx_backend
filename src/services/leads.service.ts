@@ -28,7 +28,7 @@ type LeadRow = {
   id: string;
   organization_id: string;
   campaign_id: string | null;
-  source: 'apollo' | 'csv' | 'manual';
+  source: 'apollo' | 'csv' | 'manual' | 'inbound';
   apollo_id: string | null;
   first_name: string | null;
   last_name: string | null;
@@ -838,7 +838,7 @@ export async function sendLeadNow(orgId: string, id: string) {
 export async function enrichLeads(
   organizationId: string,
   leadIds: string[],
-  campaignId: string,
+  campaignId: string | null,
 ) {
   await checkApolloEnrichmentCap(organizationId, campaignId || null);
 
