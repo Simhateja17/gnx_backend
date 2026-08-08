@@ -6,6 +6,7 @@ import { enqueueRecurringPollInbox, removeRecurringPollInbox } from '../jobs/pol
 import { getAuthUrl, exchangeCode, createOAuth2Client } from '../lib/gmail';
 import { google } from 'googleapis';
 import { AppError } from '../types';
+import { activateEmailProvider, removeEmailConnection } from '../services/email-connection.service';
 
 const router = Router();
 router.use(authenticate);
@@ -46,6 +47,14 @@ router.post('/callback', async (req: AuthenticatedRequest, res: Response, next: 
     const { data: userInfo } = await oauth2.userinfo.get();
     const email = userInfo.email ?? '';
 
+    // Keep one deterministic active outbound mailbox per organization. The
+    // other connection remains stored and can be activated later.
+    await supabase
+      .from('connected_accounts')
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .eq('organization_id', orgId)
+      .in('provider', ['gmail', 'smtp']);
+
     const record = {
       organization_id: orgId,
       provider: 'gmail',
@@ -54,6 +63,7 @@ router.post('/callback', async (req: AuthenticatedRequest, res: Response, next: 
       refresh_token: tokens.refresh_token ?? '',
       expires_at: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
       metadata: { scope: tokens.scope },
+      is_active: false,
     };
 
     const { data: existing } = await supabase
@@ -80,7 +90,12 @@ router.post('/callback', async (req: AuthenticatedRequest, res: Response, next: 
     }
 
     if (connectedAccountId) {
-      await enqueueRecurringPollInbox({ organizationId: orgId, connectedAccountId });
+      await activateEmailProvider(orgId, 'gmail');
+      try {
+        await enqueueRecurringPollInbox({ organizationId: orgId, connectedAccountId });
+      } catch (queueError) {
+        console.warn('[Gmail] failed to schedule recurring inbox polling after connect:', (queueError as Error).message);
+      }
     }
 
     res.json({ success: true, email });
@@ -95,7 +110,7 @@ router.get('/status', async (req: AuthenticatedRequest, res: Response, next: Nex
 
     const { data, error } = await supabase
       .from('connected_accounts')
-      .select('id,provider_account_id,expires_at')
+      .select('id,provider_account_id,expires_at,is_active')
       .eq('organization_id', orgId)
       .eq('provider', 'gmail')
       .maybeSingle();
@@ -104,9 +119,33 @@ router.get('/status', async (req: AuthenticatedRequest, res: Response, next: Nex
 
     res.json({
       connected: !!data,
+      active: data?.is_active === true,
       email: data?.provider_account_id ?? null,
       expiresAt: data?.expires_at ?? null,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/activate', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const orgId = getOrgId(req);
+    const result = await activateEmailProvider(orgId, 'gmail');
+    const { data: account } = await supabase
+      .from('connected_accounts')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('provider', 'gmail')
+      .maybeSingle();
+    if (account) {
+      try {
+        await enqueueRecurringPollInbox({ organizationId: orgId, connectedAccountId: account.id });
+      } catch (queueError) {
+        console.warn('[Gmail] failed to schedule recurring inbox polling after activation:', (queueError as Error).message);
+      }
+    }
+    res.json(result);
   } catch (err) {
     next(err);
   }
@@ -116,14 +155,7 @@ router.delete('/disconnect', async (req: AuthenticatedRequest, res: Response, ne
   try {
     const orgId = getOrgId(req);
 
-    const { data, error } = await supabase
-      .from('connected_accounts')
-      .delete()
-      .eq('organization_id', orgId)
-      .eq('provider', 'gmail')
-      .select('id')
-      .maybeSingle();
-
+    const { data, error } = await removeEmailConnection(orgId, 'gmail');
     if (error) throw new AppError(500, 'Failed to disconnect Gmail', error);
     if (!data) throw new AppError(404, 'No Gmail connection found');
 

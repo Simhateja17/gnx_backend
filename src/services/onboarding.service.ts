@@ -197,23 +197,26 @@ async function prepareInitialCampaign(
         error: 'Apollo is not connected yet. Connect Apollo from Prospects and run the first search there.',
       };
     } else {
+      const queuedProgress: OnboardingPreparationProgress = {
+        status: 'queued',
+        targetEnriched,
+        enriched: enrichedLeadCount,
+        candidatesFound: existingLeadCount,
+        candidatesAttempted: 0,
+        inserted: 0,
+        reused: 0,
+        skippedDuplicates: 0,
+        failed: 0,
+        rejected: 0,
+        searchPages: 0,
+        importRunId: null,
+        error: null,
+        updatedAt: new Date().toISOString(),
+      };
+
       try {
-        const queuedProgress: OnboardingPreparationProgress = {
-          status: 'queued',
-          targetEnriched,
-          enriched: enrichedLeadCount,
-          candidatesFound: existingLeadCount,
-          candidatesAttempted: 0,
-          inserted: 0,
-          reused: 0,
-          skippedDuplicates: 0,
-          failed: 0,
-          searchPages: 0,
-          error: null,
-          updatedAt: new Date().toISOString(),
-        };
         await setOnboardingPreparationProgress(queuedProgress, campaign.id);
-        await enqueueOnboardingLeads({
+        const job = await enqueueOnboardingLeads({
           organizationId: orgId,
           campaignId: campaign.id,
           targetEnriched,
@@ -222,15 +225,23 @@ async function prepareInitialCampaign(
           companySizes: listValue(data.icpCompanySizes),
           keywords: listValue(data.icpTargetIndustries).join(', '),
         });
+        console.log(`[onboarding-apollo] queued preparation job ${job.id ?? 'unknown'} for campaign ${campaign.id} (${targetEnriched} enriched leads target)`);
         apollo = {
           ...apollo,
           status: 'preparing',
         };
       } catch (error) {
+        const message = safeApolloError(error);
+        await setOnboardingPreparationProgress({
+          ...queuedProgress,
+          status: 'attention',
+          error: message,
+          updatedAt: new Date().toISOString(),
+        }, campaign.id);
         apollo = {
           ...apollo,
           status: 'failed',
-          error: safeApolloError(error),
+          error: message,
         };
       }
     }

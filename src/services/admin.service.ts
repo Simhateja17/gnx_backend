@@ -3,6 +3,8 @@ import { supabase } from '../lib/supabase';
 import { env } from '../config/env';
 import { AppError } from '../types';
 import { getSubscriptionForOrganization, providerStatusToOrganizationStatus } from './billing.service';
+import { getSetting, setSetting } from './settings.service';
+import { provisionIncludedRetellPhoneNumber } from './retell-phone.service';
 
 function countBy<T extends Record<string, any>>(rows: T[], key: keyof T) {
   return rows.reduce<Record<string, number>>((acc, row) => {
@@ -242,6 +244,21 @@ export async function createImpersonationToken(id: string, adminUserId: string) 
     ...payload,
     token: signImpersonationPayload(payload),
   };
+}
+
+export async function getAutoProvisionPhoneSetting() {
+  return (await getSetting('auto_provision_phone_number')) === true;
+}
+
+export async function setAutoProvisionPhoneSetting(enabled: boolean, adminUserId: string) {
+  await setSetting('auto_provision_phone_number', enabled, adminUserId);
+  return { enabled };
+}
+
+export async function provisionPhoneForOrganization(id: string) {
+  // Manual override: bypasses the auto_provision_phone_number setting so an
+  // admin can provision a specific org while the global switch stays off.
+  return provisionIncludedRetellPhoneNumber(id);
 }
 
 // The token is base64url(payload) + '.' + an HMAC of that payload signed with

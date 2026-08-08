@@ -1,428 +1,375 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { google } from 'googleapis';
-import {
-  createCalendarOAuth2Client,
-  exchangeCalendarCode,
-  getCalendarApi,
-  getCalendarAuthUrl,
-} from '../lib/google-calendar';
 import { supabase } from '../lib/supabase';
 import { AppError } from '../types';
 
-type CalendarConnection = {
-  id: string;
-  organization_id: string;
-  provider: 'google';
-  provider_account_id: string | null;
-  connected_email: string | null;
-  access_token: string | null;
-  refresh_token: string | null;
-  expires_at: string | null;
-  scopes: string[];
-  selected_calendar_id: string | null;
-  selected_calendar_name: string | null;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+export type CalendarSettings = {
   timezone: string;
-  status: 'pending' | 'connected' | 'error' | 'revoked' | 'disconnected';
-  last_error: string | null;
+  workingDays: number[];
+  dayStartTime: string;
+  dayEndTime: string;
+  meetingDurationMinutes: number;
+  bufferMinutes: number;
+  minNoticeMinutes: number;
+  bookingWindowDays: number;
 };
 
-function connectionStatus(connection: CalendarConnection | null) {
-  return {
-    connected: connection?.status === 'connected' && Boolean(connection.access_token && connection.refresh_token),
-    provider: connection?.provider ?? 'google',
-    email: connection?.connected_email ?? null,
-    selectedCalendarId: connection?.selected_calendar_id ?? null,
-    selectedCalendarName: connection?.selected_calendar_name ?? null,
-    timezone: connection?.timezone ?? 'UTC',
-    status: connection?.status ?? 'disconnected',
-    lastError: connection?.last_error ?? null,
-  };
-}
-
-async function loadConnection(organizationId: string): Promise<CalendarConnection | null> {
-  const { data, error } = await supabase
-    .from('calendar_connections')
-    .select('*')
-    .eq('organization_id', organizationId)
-    .eq('provider', 'google')
-    .maybeSingle();
-  if (error) throw new AppError(500, 'Failed to load Google Calendar connection', error);
-  return data as CalendarConnection | null;
-}
-
-function assertConfigured() {
-  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
-    throw new AppError(503, 'Google Calendar OAuth is not configured');
-  }
-}
-
-function toState(returnTo?: string) {
-  return returnTo
-    ? Buffer.from(JSON.stringify({ returnTo })).toString('base64url')
-    : undefined;
-}
-
-export function getGoogleCalendarAuthUrl(returnTo?: string) {
-  assertConfigured();
-  return getCalendarAuthUrl(toState(returnTo));
-}
-
-async function updateAccessToken(connectionId: string, accessToken: string, expiryDate: number | null) {
-  const { error } = await supabase
-    .from('calendar_connections')
-    .update({
-      access_token: accessToken,
-      expires_at: expiryDate ? new Date(expiryDate).toISOString() : null,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', connectionId);
-  if (error) console.warn('[calendar] failed to persist refreshed Google token:', error.message);
-}
-
-async function loadCalendarClient(organizationId: string) {
-  const connection = await loadConnection(organizationId);
-  if (!connection || connection.status !== 'connected' || !connection.access_token || !connection.refresh_token) {
-    throw new AppError(409, 'Connect Google Calendar before using calendar features');
-  }
-
-  const calendar = getCalendarApi(
-    connection.access_token,
-    connection.refresh_token,
-    (tokens) => { void updateAccessToken(connection.id, tokens.access_token, tokens.expiry_date); },
-  );
-  return { connection, calendar };
-}
-
-export async function connectGoogleCalendar(organizationId: string, code: string) {
-  assertConfigured();
-  if (!code?.trim()) throw new AppError(400, 'Google Calendar authorization code is required');
-
-  let tokens: Awaited<ReturnType<typeof exchangeCalendarCode>>;
-  try {
-    tokens = await exchangeCalendarCode(code);
-  } catch (error: any) {
-    throw new AppError(502, `Google Calendar authorization failed: ${error?.message ?? 'unknown error'}`, error);
-  }
-  if (!tokens.access_token) throw new AppError(502, 'Google did not return a Calendar access token');
-
-  const client = createCalendarOAuth2Client();
-  client.setCredentials(tokens);
-  let email = '';
-  try {
-    const userInfo = await google.oauth2({ version: 'v2', auth: client }).userinfo.get();
-    email = userInfo.data.email ?? '';
-  } catch (error: any) {
-    throw new AppError(502, `Failed to read Google account identity: ${error?.message ?? 'unknown error'}`, error);
-  }
-
-  const existing = await loadConnection(organizationId);
-  const selectedCalendarId = existing?.selected_calendar_id ?? 'primary';
-  const scopes = typeof tokens.scope === 'string'
-    ? tokens.scope.split(' ').filter(Boolean)
-    : existing?.scopes ?? [];
-  const { data, error } = await supabase
-    .from('calendar_connections')
-    .upsert({
-      organization_id: organizationId,
-      provider: 'google',
-      provider_account_id: (email || existing?.provider_account_id) ?? null,
-      connected_email: (email || existing?.connected_email) ?? null,
-      access_token: tokens.access_token,
-      // Google may omit refresh_token when the user has already granted the
-      // scopes. Preserve the existing refresh token in that case.
-      refresh_token: tokens.refresh_token ?? existing?.refresh_token ?? null,
-      expires_at: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
-      scopes,
-      selected_calendar_id: selectedCalendarId,
-      selected_calendar_name: existing?.selected_calendar_name ?? null,
-      timezone: existing?.timezone ?? 'UTC',
-      status: 'connected',
-      last_error: null,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'organization_id,provider' })
-    .select('*')
-    .single();
-  if (error || !data) throw new AppError(500, 'Failed to save Google Calendar connection', error);
-
-  return connectionStatus(data as CalendarConnection);
-}
-
-export async function getGoogleCalendarStatus(organizationId: string) {
-  return connectionStatus(await loadConnection(organizationId));
-}
-
-export async function listGoogleCalendars(organizationId: string) {
-  const { connection, calendar } = await loadCalendarClient(organizationId);
-  try {
-    const result = await calendar.calendarList.list({ maxResults: 250, showDeleted: false });
-    return (result.data.items ?? []).map(item => ({
-      id: item.id ?? '',
-      name: item.summaryOverride ?? item.summary ?? item.id ?? 'Calendar',
-      description: item.description ?? null,
-      primary: item.primary === true,
-      selected: item.id === (connection.selected_calendar_id ?? 'primary'),
-      timezone: item.timeZone ?? connection.timezone ?? 'UTC',
-      accessRole: item.accessRole ?? null,
-    })).filter(item => item.id);
-  } catch (error: any) {
-    throw new AppError(502, `Failed to list Google Calendars: ${error?.message ?? 'unknown error'}`, error);
-  }
-}
-
-export async function selectGoogleCalendar(organizationId: string, calendarId: string) {
-  if (!calendarId?.trim()) throw new AppError(400, 'Calendar ID is required');
-  const { calendar } = await loadCalendarClient(organizationId);
-  let selected;
-  try {
-    selected = await calendar.calendars.get({ calendarId });
-  } catch (error: any) {
-    throw new AppError(502, `Failed to load selected Google Calendar: ${error?.message ?? 'unknown error'}`, error);
-  }
-
-  const { data, error } = await supabase
-    .from('calendar_connections')
-    .update({
-      selected_calendar_id: calendarId,
-      selected_calendar_name: selected.data.summary ?? calendarId,
-      timezone: selected.data.timeZone ?? 'UTC',
-      updated_at: new Date().toISOString(),
-    })
-    .eq('organization_id', organizationId)
-    .eq('provider', 'google')
-    .select('*')
-    .single();
-  if (error || !data) throw new AppError(500, 'Failed to save selected Google Calendar', error);
-  return connectionStatus(data as CalendarConnection);
-}
-
-function parseDate(value: string, field: string) {
-  const date = new Date(value);
-  if (!value || Number.isNaN(date.getTime())) throw new AppError(400, `${field} must be a valid ISO date`);
-  return date;
-}
-
-export async function getGoogleCalendarFreeBusy(
-  organizationId: string,
-  input: { timeMin: string; timeMax: string; calendarId?: string },
-) {
-  const start = parseDate(input.timeMin, 'timeMin');
-  const end = parseDate(input.timeMax, 'timeMax');
-  if (end <= start) throw new AppError(400, 'timeMax must be after timeMin');
-  if (end.getTime() - start.getTime() > 31 * 24 * 60 * 60 * 1000) {
-    throw new AppError(400, 'Free/busy range cannot exceed 31 days');
-  }
-
-  const { connection, calendar } = await loadCalendarClient(organizationId);
-  const calendarId = input.calendarId?.trim() || connection.selected_calendar_id || 'primary';
-  try {
-    const result = await calendar.freebusy.query({
-      requestBody: {
-        timeMin: start.toISOString(),
-        timeMax: end.toISOString(),
-        timeZone: connection.timezone || 'UTC',
-        items: [{ id: calendarId }],
-      },
-    });
-    return {
-      calendarId,
-      timeMin: start.toISOString(),
-      timeMax: end.toISOString(),
-      busy: result.data.calendars?.[calendarId]?.busy ?? [],
-    };
-  } catch (error: any) {
-    throw new AppError(502, `Failed to read Google Calendar availability: ${error?.message ?? 'unknown error'}`, error);
-  }
-}
-
-export function buildGoogleCalendarEvent(input: {
-  title: string;
-  description?: string | null;
-  startAt: string;
-  endAt: string;
+type CalendarSettingsRow = {
   timezone: string;
-  attendeeEmail: string;
-  attendeeName?: string | null;
-  createConference?: boolean;
-  requestId?: string;
-}) {
-  const event: Record<string, unknown> = {
-    summary: input.title,
-    description: input.description ?? undefined,
-    start: { dateTime: input.startAt, timeZone: input.timezone },
-    end: { dateTime: input.endAt, timeZone: input.timezone },
-    attendees: [{ email: input.attendeeEmail, displayName: input.attendeeName ?? undefined }],
+  working_days: number[];
+  day_start_time: string;
+  day_end_time: string;
+  meeting_duration_minutes: number;
+  buffer_minutes: number;
+  min_notice_minutes: number;
+  booking_window_days: number;
+};
+
+function mapSettings(row: CalendarSettingsRow): CalendarSettings {
+  return {
+    timezone: row.timezone,
+    workingDays: row.working_days,
+    dayStartTime: row.day_start_time.slice(0, 5),
+    dayEndTime: row.day_end_time.slice(0, 5),
+    meetingDurationMinutes: row.meeting_duration_minutes,
+    bufferMinutes: row.buffer_minutes,
+    minNoticeMinutes: row.min_notice_minutes,
+    bookingWindowDays: row.booking_window_days,
   };
-  if (input.createConference) {
-    event.conferenceData = {
-      createRequest: {
-        requestId: input.requestId ?? randomUUID(),
-        conferenceSolutionKey: { type: 'hangoutsMeet' },
-      },
-    };
-  }
-  return event;
 }
 
-function meetingJoinUrl(event: any): string | null {
-  return event.hangoutLink
-    ?? event.conferenceData?.entryPoints?.find((entry: any) => entry.entryPointType === 'video')?.uri
-    ?? event.htmlLink
-    ?? null;
-}
-
-export async function createGoogleCalendarMeeting(input: {
-  organizationId: string;
-  leadId?: string | null;
-  campaignId?: string | null;
-  title?: string;
-  description?: string | null;
-  startAt: string;
-  durationMinutes?: number;
-  timezone?: string;
-  calendarId?: string;
-  createConference?: boolean;
-  idempotencyKey?: string;
-}) {
-  const start = parseDate(input.startAt, 'startAt');
-  const durationMinutes = input.durationMinutes ?? 30;
-  if (!Number.isInteger(durationMinutes) || durationMinutes < 5 || durationMinutes > 480) {
-    throw new AppError(400, 'durationMinutes must be an integer between 5 and 480');
-  }
-  const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
-  const idempotencyKey = input.idempotencyKey?.trim()
-    || createHash('sha256').update(JSON.stringify({
-      leadId: input.leadId ?? null,
-      campaignId: input.campaignId ?? null,
-      startAt: start.toISOString(),
-      durationMinutes,
-      calendarId: input.calendarId ?? null,
-    })).digest('hex');
-
-  const { data: existingMeeting, error: existingError } = await supabase
-    .from('meetings')
-    .select('*')
-    .eq('organization_id', input.organizationId)
-    .eq('idempotency_key', idempotencyKey)
+/**
+ * Whether the customer has ever explicitly saved availability, as opposed to
+ * the row that's silently auto-created with generic defaults the first time
+ * anything reads calendar_settings. Used to gate the setup checklist and
+ * product tour — the agent can already book on the defaults, but a wrong
+ * default timezone booking meetings at 3am is worth blocking on.
+ */
+export async function isCalendarConfigured(organizationId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('calendar_settings')
+    .select('is_configured')
+    .eq('organization_id', organizationId)
     .maybeSingle();
-  if (existingError) throw new AppError(500, 'Failed to check existing calendar meeting', existingError);
-  if (existingMeeting) return existingMeeting;
+  if (error) throw new AppError(500, 'Failed to check availability status', error);
+  return Boolean((data as { is_configured: boolean } | null)?.is_configured);
+}
 
-  let lead: any = null;
-  if (input.leadId) {
-    const leadResult = await supabase
-      .from('leads')
-      .select('id,account_id,first_name,last_name,name,email,company')
-      .eq('organization_id', input.organizationId)
-      .eq('id', input.leadId)
-      .single();
-    if (leadResult.error || !leadResult.data) throw new AppError(404, 'Lead not found for calendar meeting', leadResult.error);
-    lead = leadResult.data;
-  }
-  const attendeeEmail = lead?.email;
-  if (!attendeeEmail || !/^\S+@\S+\.\S+$/.test(attendeeEmail)) {
-    throw new AppError(400, 'A valid lead email is required to create a calendar meeting');
-  }
+export async function getCalendarSettings(organizationId: string): Promise<CalendarSettings> {
+  const { data, error } = await supabase
+    .from('calendar_settings')
+    .select('*')
+    .eq('organization_id', organizationId)
+    .maybeSingle();
+  if (error) throw new AppError(500, 'Failed to load calendar settings', error);
+  if (data) return mapSettings(data as CalendarSettingsRow);
 
-  const { connection, calendar } = await loadCalendarClient(input.organizationId);
-  const calendarId = input.calendarId?.trim() || connection.selected_calendar_id || 'primary';
-  const timezone = input.timezone?.trim() || connection.timezone || 'UTC';
-  const attendeeName = [lead.first_name, lead.last_name].filter(Boolean).join(' ') || lead.name;
-  const title = input.title?.trim() || `Sales meeting with ${attendeeName || lead.company || 'prospect'}`;
-  const eventBody = buildGoogleCalendarEvent({
-    title,
-    description: input.description,
-    startAt: start.toISOString(),
-    endAt: end.toISOString(),
-    timezone,
-    attendeeEmail,
-    attendeeName,
-    createConference: input.createConference !== false,
-    requestId: `globonexo-${randomUUID()}`,
+  const { data: created, error: createError } = await supabase
+    .from('calendar_settings')
+    .insert({ organization_id: organizationId })
+    .select('*')
+    .single();
+  if (createError || !created) throw new AppError(500, 'Failed to initialize calendar settings', createError);
+  return mapSettings(created as CalendarSettingsRow);
+}
+
+export async function updateCalendarSettings(
+  organizationId: string,
+  input: Partial<CalendarSettings>,
+): Promise<CalendarSettings> {
+  await getCalendarSettings(organizationId); // ensures the row exists before patching
+
+  // Any explicit PUT — even one that re-saves the defaults unchanged — is the
+  // customer confirming this is right, which is what is_configured tracks.
+  const patch: Record<string, unknown> = { updated_at: new Date().toISOString(), is_configured: true };
+  if (input.timezone !== undefined) patch.timezone = input.timezone;
+  if (input.workingDays !== undefined) patch.working_days = input.workingDays;
+  if (input.dayStartTime !== undefined) patch.day_start_time = input.dayStartTime;
+  if (input.dayEndTime !== undefined) patch.day_end_time = input.dayEndTime;
+  if (input.meetingDurationMinutes !== undefined) patch.meeting_duration_minutes = input.meetingDurationMinutes;
+  if (input.bufferMinutes !== undefined) patch.buffer_minutes = input.bufferMinutes;
+  if (input.minNoticeMinutes !== undefined) patch.min_notice_minutes = input.minNoticeMinutes;
+  if (input.bookingWindowDays !== undefined) patch.booking_window_days = input.bookingWindowDays;
+
+  const { data, error } = await supabase
+    .from('calendar_settings')
+    .update(patch)
+    .eq('organization_id', organizationId)
+    .select('*')
+    .single();
+  if (error || !data) throw new AppError(500, 'Failed to update calendar settings', error);
+  return mapSettings(data as CalendarSettingsRow);
+}
+
+// ── Timezone-aware slot math (no date library in this project - see
+// email.service.ts's startOfDayUtcForTimezone for the same technique) ──
+
+function timezoneOffsetMinutes(timeZone: string, date: Date): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(date).reduce((acc, p) => {
+    if (p.type !== 'literal') acc[p.type] = p.value;
+    return acc;
+  }, {} as Record<string, string>);
+
+  const asUtc = Date.UTC(
+    Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+    Number(parts.hour), Number(parts.minute), Number(parts.second),
+  );
+  return (asUtc - date.getTime()) / 60_000;
+}
+
+// Resolves `HH:MM` local time in `timeZone` to a UTC instant, on the local
+// calendar day that `reference` falls on.
+function localTimeToUtc(timeZone: string, reference: Date, hhmm: string): Date {
+  const offsetMinutes = timezoneOffsetMinutes(timeZone, reference);
+  const shifted = new Date(reference.getTime() + offsetMinutes * 60_000);
+  const [hours, minutes] = hhmm.split(':').map(Number);
+  shifted.setUTCHours(hours, minutes, 0, 0);
+  return new Date(shifted.getTime() - offsetMinutes * 60_000);
+}
+
+function localDayOfWeek(timeZone: string, date: Date): number {
+  const weekday = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' }).format(date);
+  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekday);
+}
+
+function localHour(timeZone: string, date: Date): number {
+  return Number(new Intl.DateTimeFormat('en-US', { timeZone, hour: '2-digit', hourCycle: 'h23' }).format(date));
+}
+
+function formatSlotLabel(date: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone, weekday: 'long', month: 'long', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+  }).format(date);
+}
+
+function parsePreferredDayOfWeek(text?: string): number | null {
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  const idx = WEEKDAY_NAMES.findIndex(day => lower.includes(day));
+  return idx === -1 ? null : idx;
+}
+
+function preferredTimeOfDayRange(period?: string): [number, number] | null {
+  switch (period) {
+    case 'morning': return [0, 12];
+    case 'afternoon': return [12, 17];
+    case 'evening': return [17, 24];
+    default: return null;
+  }
+}
+
+function generateCandidateSlots(
+  settings: CalendarSettings,
+  opts: { minStart: Date; maxDays: number; limit: number },
+): Date[] {
+  const slots: Date[] = [];
+  const stepMinutes = settings.meetingDurationMinutes + settings.bufferMinutes;
+  const durationMs = settings.meetingDurationMinutes * 60_000;
+
+  for (let dayOffset = 0; dayOffset <= opts.maxDays && slots.length < opts.limit; dayOffset++) {
+    const dayReference = new Date(opts.minStart.getTime() + dayOffset * DAY_MS);
+    if (!settings.workingDays.includes(localDayOfWeek(settings.timezone, dayReference))) continue;
+
+    let cursor = localTimeToUtc(settings.timezone, dayReference, settings.dayStartTime);
+    const dayEnd = localTimeToUtc(settings.timezone, dayReference, settings.dayEndTime);
+
+    while (cursor.getTime() + durationMs <= dayEnd.getTime() && slots.length < opts.limit) {
+      if (cursor.getTime() >= opts.minStart.getTime()) slots.push(new Date(cursor));
+      cursor = new Date(cursor.getTime() + stepMinutes * 60_000);
+    }
+  }
+  return slots;
+}
+
+export async function checkAvailability(
+  organizationId: string,
+  opts: { preferredDay?: string; preferredTimeOfDay?: string } = {},
+) {
+  const settings = await getCalendarSettings(organizationId);
+  const minStart = new Date(Date.now() + settings.minNoticeMinutes * 60_000);
+  const windowEnd = new Date(minStart.getTime() + settings.bookingWindowDays * DAY_MS);
+
+  const pool = generateCandidateSlots(settings, { minStart, maxDays: settings.bookingWindowDays, limit: 300 });
+
+  const { data: busyRows, error } = await supabase
+    .from('meetings')
+    .select('scheduled_at, duration_minutes')
+    .eq('organization_id', organizationId)
+    .eq('status', 'scheduled')
+    .gte('scheduled_at', minStart.toISOString())
+    .lte('scheduled_at', windowEnd.toISOString());
+  if (error) throw new AppError(500, 'Failed to check existing meetings', error);
+
+  const busyRanges = (busyRows ?? []).map(row => {
+    const start = new Date(row.scheduled_at).getTime();
+    return { start, end: start + row.duration_minutes * 60_000 };
   });
 
-  let event;
-  try {
-    const result = await calendar.events.insert({
-      calendarId,
-      conferenceDataVersion: 1,
-      sendUpdates: 'all',
-      requestBody: eventBody as any,
-    });
-    event = result.data;
-  } catch (error: any) {
-    throw new AppError(502, `Failed to create Google Calendar event: ${error?.message ?? 'unknown error'}`, error);
-  }
-  if (!event.id) throw new AppError(502, 'Google Calendar returned an event without an ID');
+  const durationMs = settings.meetingDurationMinutes * 60_000;
+  const isFree = (slot: Date) => {
+    const start = slot.getTime();
+    const end = start + durationMs;
+    return !busyRanges.some(b => start < b.end && end > b.start);
+  };
 
-  const joinUrl = meetingJoinUrl(event);
-  const { data: meeting, error: meetingError } = await supabase
+  const preferredDow = parsePreferredDayOfWeek(opts.preferredDay);
+  const timeRange = preferredTimeOfDayRange(opts.preferredTimeOfDay);
+  const matchesPreference = (slot: Date) => {
+    if (preferredDow !== null && localDayOfWeek(settings.timezone, slot) !== preferredDow) return false;
+    if (timeRange) {
+      const hour = localHour(settings.timezone, slot);
+      if (hour < timeRange[0] || hour >= timeRange[1]) return false;
+    }
+    return true;
+  };
+
+  const free = pool.filter(isFree);
+  let candidates = free.filter(matchesPreference).slice(0, 3);
+  if (candidates.length === 0) candidates = free.slice(0, 3);
+
+  return {
+    timezone: settings.timezone,
+    meetingDurationMinutes: settings.meetingDurationMinutes,
+    slots: candidates.map(slot => ({ startAt: slot.toISOString(), label: formatSlotLabel(slot, settings.timezone) })),
+  };
+}
+
+async function findActiveMeetingForLead(organizationId: string, leadId: string) {
+  const { data, error } = await supabase
+    .from('meetings')
+    .select('*')
+    .eq('organization_id', organizationId)
+    .eq('lead_id', leadId)
+    .eq('status', 'scheduled')
+    .order('scheduled_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new AppError(500, 'Failed to look up existing meeting', error);
+  return data;
+}
+
+function assertMeetsNotice(settings: CalendarSettings, start: Date) {
+  if (Number.isNaN(start.getTime())) throw new AppError(400, 'startAt must be a valid ISO timestamp');
+  const minStart = new Date(Date.now() + settings.minNoticeMinutes * 60_000);
+  if (start.getTime() < minStart.getTime()) {
+    throw new AppError(409, 'That time no longer meets our minimum notice window');
+  }
+}
+
+export async function bookMeeting(
+  organizationId: string,
+  input: { leadId: string | null; campaignId: string | null; callId: string | null; startAt: string },
+) {
+  if (!input.leadId) throw new AppError(400, 'No lead associated with this call');
+
+  const settings = await getCalendarSettings(organizationId);
+  const start = new Date(input.startAt);
+  assertMeetsNotice(settings, start);
+
+  const { data: lead, error: leadError } = await supabase
+    .from('leads')
+    .select('id, first_name, last_name, name, company, phone')
+    .eq('organization_id', organizationId)
+    .eq('id', input.leadId)
+    .single();
+  if (leadError || !lead) throw new AppError(404, 'Lead not found for booking', leadError);
+
+  const attendeeName = [lead.first_name, lead.last_name].filter(Boolean).join(' ') || lead.name || 'Prospect';
+  const title = `Sales call with ${attendeeName}${lead.company ? ` (${lead.company})` : ''}`;
+
+  const { data: meeting, error } = await supabase
     .from('meetings')
     .insert({
-      organization_id: input.organizationId,
-      campaign_id: input.campaignId ?? null,
-      lead_id: input.leadId ?? null,
-      account_id: lead?.account_id ?? null,
+      organization_id: organizationId,
+      campaign_id: input.campaignId,
+      lead_id: input.leadId,
+      call_id: input.callId,
       title,
       scheduled_at: start.toISOString(),
-      duration_minutes: durationMinutes,
-      join_url: joinUrl,
-      conference_url: joinUrl,
-      attendee_email: attendeeEmail,
-      timezone,
-      provider: 'google_calendar',
-      provider_calendar_id: calendarId,
-      provider_event_id: event.id,
-      external_etag: event.etag ?? null,
-      idempotency_key: idempotencyKey,
-      source: 'calendar',
+      duration_minutes: settings.meetingDurationMinutes,
+      attendee_phone: lead.phone ?? null,
+      timezone: settings.timezone,
+      source: 'call',
       status: 'scheduled',
-      last_synced_at: new Date().toISOString(),
     })
     .select('*')
     .single();
-  if (meetingError?.code === '23505') {
-    const { data: concurrent } = await supabase
-      .from('meetings')
-      .select('*')
-      .eq('organization_id', input.organizationId)
-      .eq('idempotency_key', idempotencyKey)
-      .maybeSingle();
-    if (concurrent) return concurrent;
+
+  if (error?.code === '23505') {
+    throw new AppError(409, 'That slot was just taken. Please offer the prospect a different time.');
   }
-  if (meetingError || !meeting) throw new AppError(500, 'Google event was created but meeting could not be saved', meetingError);
-  return meeting;
+  if (error || !meeting) throw new AppError(500, 'Failed to book meeting', error);
+
+  await supabase.from('leads').update({ status: 'meeting_booked' }).eq('id', input.leadId);
+
+  return { booked: true, scheduledAt: meeting.scheduled_at, label: formatSlotLabel(start, settings.timezone), timezone: settings.timezone };
 }
 
-export async function cancelGoogleCalendarMeeting(organizationId: string, meetingId: string) {
-  const { data: meeting, error: meetingError } = await supabase
+export async function rescheduleMeetingForLead(organizationId: string, leadId: string | null, newStartAt: string) {
+  if (!leadId) throw new AppError(400, 'No lead associated with this call');
+  const meeting = await findActiveMeetingForLead(organizationId, leadId);
+  if (!meeting) throw new AppError(404, 'This prospect has no upcoming meeting to reschedule');
+
+  const settings = await getCalendarSettings(organizationId);
+  const start = new Date(newStartAt);
+  assertMeetsNotice(settings, start);
+
+  const { data, error } = await supabase
     .from('meetings')
-    .select('id,provider,provider_calendar_id,provider_event_id,status')
+    .update({ scheduled_at: start.toISOString(), updated_at: new Date().toISOString() })
+    .eq('id', meeting.id)
+    .select('*')
+    .single();
+
+  if (error?.code === '23505') throw new AppError(409, 'That slot was just taken. Please offer the prospect a different time.');
+  if (error || !data) throw new AppError(500, 'Failed to reschedule meeting', error);
+
+  return { rescheduled: true, scheduledAt: data.scheduled_at, label: formatSlotLabel(start, settings.timezone), timezone: settings.timezone };
+}
+
+export async function cancelMeetingForLead(organizationId: string, leadId: string | null) {
+  if (!leadId) throw new AppError(400, 'No lead associated with this call');
+  const meeting = await findActiveMeetingForLead(organizationId, leadId);
+  if (!meeting) throw new AppError(404, 'This prospect has no upcoming meeting to cancel');
+
+  const { error } = await supabase
+    .from('meetings')
+    .update({ status: 'cancelled', canceled_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .eq('id', meeting.id);
+  if (error) throw new AppError(500, 'Failed to cancel meeting', error);
+
+  await supabase.from('leads').update({ status: 'engaged' }).eq('id', leadId).eq('status', 'meeting_booked');
+
+  return { cancelled: true };
+}
+
+export async function cancelMeetingById(organizationId: string, meetingId: string) {
+  const { data: meeting, error: fetchError } = await supabase
+    .from('meetings')
+    .select('id, lead_id, status')
     .eq('organization_id', organizationId)
     .eq('id', meetingId)
     .single();
-  if (meetingError || !meeting) throw new AppError(404, 'Meeting not found', meetingError);
+  if (fetchError || !meeting) throw new AppError(404, 'Meeting not found');
   if (meeting.status === 'cancelled') return { id: meeting.id, status: 'cancelled' };
-
-  if (meeting.provider === 'google_calendar' && meeting.provider_calendar_id && meeting.provider_event_id) {
-    const { calendar } = await loadCalendarClient(organizationId);
-    try {
-      await calendar.events.delete({
-        calendarId: meeting.provider_calendar_id,
-        eventId: meeting.provider_event_id,
-        sendUpdates: 'all',
-      });
-    } catch (error: any) {
-      if (error?.code !== 404) throw new AppError(502, `Failed to cancel Google Calendar event: ${error?.message ?? 'unknown error'}`, error);
-    }
-  }
 
   const { data, error } = await supabase
     .from('meetings')
     .update({ status: 'cancelled', canceled_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-    .eq('organization_id', organizationId)
     .eq('id', meetingId)
     .select('id,status')
     .single();
-  if (error || !data) throw new AppError(500, 'Failed to mark meeting cancelled', error);
+  if (error || !data) throw new AppError(500, 'Failed to cancel meeting', error);
+
+  if (meeting.lead_id) {
+    await supabase.from('leads').update({ status: 'engaged' }).eq('id', meeting.lead_id).eq('status', 'meeting_booked');
+  }
   return data;
 }

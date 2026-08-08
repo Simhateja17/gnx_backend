@@ -271,6 +271,176 @@ export async function generateEmail(orgId: string, input: GenerateEmailInput) {
   };
 }
 
+// ── Sequence generation (all steps in one call) ──────────────────
+
+export type SequenceStepRequest = {
+  stepNumber: number;
+  stepType: string;
+  instruction: string | null;
+};
+
+export type SequenceGenerationInput = {
+  campaign: Record<string, any>;
+  lead: Record<string, any>;
+  agentConfig: Record<string, any>;
+  steps: SequenceStepRequest[];
+  /** From context-readiness: exactly what Apollo has, and what it does not. */
+  facts: {
+    knownFacts: Record<string, string>;
+    unavailableFacts: string[];
+    contextScore: string;
+    thinContext: boolean;
+  };
+  previousEmails: Array<{ step_number?: number; subject: string; body: string }>;
+};
+
+/**
+ * The fact sheet.
+ *
+ * Naming the fields Apollo does NOT have is the part that does the work.
+ * Telling a model "do not invent facts" is weak; telling it "you do not know
+ * this company's industry" removes the temptation to reach for one. This is
+ * the single most effective guard against invented personalisation, and it is
+ * why context is scored before generation rather than after.
+ */
+function buildFactSheet(facts: SequenceGenerationInput['facts']): string {
+  const known = Object.entries(facts.knownFacts)
+    .map(([key, value]) => `- ${key}: ${value}`)
+    .join('\n');
+
+  const unavailable = facts.unavailableFacts.length > 0
+    ? facts.unavailableFacts.map(key => `- ${key}`).join('\n')
+    : '- (none)';
+
+  const thinNote = facts.thinContext
+    ? `\nCONTEXT IS THIN (${facts.contextScore}). Write a short, honest email based on role and company alone. Do NOT pad it with generic industry commentary to make it feel researched. A brief truthful email is better than a padded one.`
+    : '';
+
+  return `VERIFIED FACTS (the only facts you may state about this prospect or company):
+${known || '- (none)'}
+
+FACTS YOU DO NOT HAVE - never assert, imply, or guess at these:
+${unavailable}
+
+You may not claim the prospect posted, announced, launched, hired, raised funding, or discussed anything unless it appears in the verified list above.${thinNote}`;
+}
+
+function buildSequenceSystemPrompt(input: SequenceGenerationInput): string {
+  const { agentConfig, campaign, steps } = input;
+  const toneInstruction = getToneInstruction(agentConfig.tone);
+  const hookInstruction = getHookInstruction(agentConfig.hook_style);
+
+  const stepLines = steps.map(step => {
+    const instruction = step.instruction?.trim();
+    const fallback = step.stepNumber === 1
+      ? `First touch. Open with one factual detail from the verified list and invite a short conversation.${hookInstruction ? ` Opening line: ${hookInstruction}` : ''}`
+      : step.stepNumber === 2
+        ? 'Follow-up. Add one genuinely new angle. Do not restate the first email.'
+        : 'Final follow-up. Polite, low pressure, easy to decline without burning the bridge.';
+    return `- Step ${step.stepNumber} (${step.stepType}): ${instruction || fallback}`;
+  }).join('\n');
+
+  return `You are ${agentConfig.agent_name}, an AI sales agent writing a cold outreach sequence.
+
+PRODUCT: ${agentConfig.product_description}
+VALUE PROPOSITION: ${agentConfig.value_proposition}
+${agentConfig.pain_points ? `BUYER PAIN POINTS: ${agentConfig.pain_points}` : ''}
+${agentConfig.booking_link ? `BOOKING LINK: ${agentConfig.booking_link}` : ''}
+${formatPromptContextForPrompt(campaign.prompt_context)}
+
+TONE: ${toneInstruction}
+
+SEQUENCE TO WRITE:
+${stepLines}
+
+WRITING RULES:
+- Plain text only. No Markdown, no HTML, no bullet characters, no headings.
+- No placeholders of any kind. Every email must be ready to send as written.
+- Do not invent facts. Use only the verified facts supplied.
+- Use one strong verified detail; add a second only if it genuinely helps.
+- Each step must introduce a different angle. Never repeat a paragraph.
+- Low-friction call to action. No hype, no exaggerated claims, no guarantees.
+- Never mention research, data sources, enrichment, or how you found them.
+- No signature or unsubscribe footer - the application appends those.
+- Avoid em dashes.
+- Subject lines: four to six words, no "Subject:" prefix.
+- Let the body find its natural length. Clarity matters more than word count.
+
+Respond with JSON only, in exactly this shape:
+{"emails":[{"step":1,"subject":"...","body":"..."}]}
+Include one entry for every step listed above.`;
+}
+
+function buildSequenceUserPrompt(input: SequenceGenerationInput): string {
+  const { lead, facts, previousEmails } = input;
+
+  const firstName = (lead.first_name ?? '').trim();
+  const greetingRule = firstName
+    ? `Address the prospect as "${firstName}". Use no other name.`
+    : 'No reliable first name is available. Open WITHOUT a greeting name - do not guess one, and do not infer one from the email address.';
+
+  let prompt = `PROSPECT (this is the only person you are writing to):
+- First name: ${firstName || '(unknown)'}
+- Full name: ${lead.name || '(unknown)'}
+- Job title: ${lead.title || '(unknown)'}
+- Company: ${lead.company || '(unknown)'}
+
+${greetingRule}
+
+${buildFactSheet(facts)}`;
+
+  if (previousEmails.length > 0) {
+    prompt += '\n\nALREADY SENT IN THIS SEQUENCE (do not repeat these):';
+    for (const email of previousEmails) {
+      prompt += `\n---\nStep ${email.step_number ?? '?'} subject: ${email.subject}\n${email.body}`;
+    }
+  }
+
+  return prompt;
+}
+
+/**
+ * Generates every requested step in one model call and returns the raw
+ * response. Parsing, validation, and retry are the caller's job - they need to
+ * retry only the steps that failed while keeping the ones that passed.
+ */
+export async function generateSequenceRaw(input: SequenceGenerationInput): Promise<{
+  raw: string;
+  provider: string;
+  model: string;
+}> {
+  const systemPrompt = sanitizeText(buildSequenceSystemPrompt(input));
+  const userPrompt = sanitizeText(buildSequenceUserPrompt(input));
+
+  const raw = await withRetry(async () => {
+    const timeout = createTimeout();
+    try {
+      const completion = await openai.chat.completions.create({
+        model: env.AZURE_OPENAI_CHAT_DEPLOYMENT,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.7,
+        max_completion_tokens: 2048,
+      }, { signal: timeout.signal });
+
+      const content = completion.choices[0]?.message?.content;
+      if (!content) throw new AppError(502, 'No response from AI model');
+      return content;
+    } finally {
+      timeout.clear();
+    }
+  }, { label: 'generate-sequence' });
+
+  return {
+    raw,
+    provider: 'azure-openai',
+    model: env.AZURE_OPENAI_CHAT_DEPLOYMENT,
+  };
+}
+
 // ── Reply generation ─────────────────────────────────────────────
 
 function buildReplySystemPrompt(agentConfig: any, hasHistory: boolean): string {
@@ -414,10 +584,16 @@ export async function generateVoicePrompt(orgId: string, input: GenerateVoicePro
   const agentConfig = await ensureAgentConfig(orgId);
 
   let campaignContext = '';
+  let productDescription = agentConfig.product_description;
+  let valueProposition = agentConfig.value_proposition;
+  let painPoints = agentConfig.pain_points;
+  let tone = agentConfig.tone;
+  let objections = agentConfig.objections;
+
   if (input.campaignId) {
     const campaignResult = await supabase
       .from('campaigns')
-      .select('prompt_context')
+      .select('prompt_context, product_description, value_proposition, pain_points, tone, objections')
       .eq('id', input.campaignId)
       .eq('organization_id', orgId)
       .single();
@@ -426,9 +602,14 @@ export async function generateVoicePrompt(orgId: string, input: GenerateVoicePro
       bullet: '- ',
       labels: 'title',
     });
+    productDescription = campaignResult.data.product_description ?? productDescription;
+    valueProposition = campaignResult.data.value_proposition ?? valueProposition;
+    painPoints = campaignResult.data.pain_points ?? painPoints;
+    tone = campaignResult.data.tone ?? tone;
+    objections = campaignResult.data.objections ?? objections;
   }
 
-  const toneInstruction = getToneInstruction(agentConfig.tone);
+  const toneInstruction = getToneInstruction(tone);
 
   const prompt = `You are ${agentConfig.agent_name}, an AI sales agent making outbound phone calls.
 
@@ -439,9 +620,10 @@ COMPLIANCE - YOU MUST FOLLOW THESE RULES:
 4. If the prospect asks you to stop calling or remove them, acknowledge immediately and end the call politely.
 
 ABOUT YOU:
-- Product: ${agentConfig.product_description}
-- Value Proposition: ${agentConfig.value_proposition}
-${agentConfig.pain_points ? `- Buyer Pain Points to Address: ${agentConfig.pain_points}` : ''}
+- Product: ${productDescription}
+- Value Proposition: ${valueProposition}
+${painPoints ? `- Buyer Pain Points to Address: ${painPoints}` : ''}
+${objections ? `- Common Objections to Handle: ${objections}` : ''}
 ${campaignContext}
 
 TONE: ${toneInstruction}
@@ -452,8 +634,15 @@ CALL STRUCTURE:
 3. Give a one-sentence reason for calling tied to their role as {{lead_title}} at {{lead_company}}.
 4. Ask an open-ended qualifying question.
 5. Listen and respond to their answers naturally.
-6. If there is interest, propose a meeting: "I'd love to set up a quick 15-minute call with our team. Would {{lead_name}}, does sometime this week work?"${agentConfig.booking_link ? ` Mention you will send a booking link to their email.` : ''}
+6. If there is interest, propose a meeting: "I'd love to set up a quick call with our team. Does sometime this week work?" Then follow the MEETING BOOKING rules below.
 7. If not interested, thank them for their time and end politely.
+
+MEETING BOOKING:
+1. As soon as the prospect agrees to a meeting, call check_availability. Do not ask them for a time first - read back the 2-3 slots it returns (in the timezone it gives you) and ask which works.
+2. If none of the offered slots work, ask what day or time of day generally works better for them, then call check_availability again passing that as preferred_day / preferred_time_of_day.
+3. The instant the prospect verbally agrees to one specific slot, call book_meeting with that exact start time. This locks it immediately - there is no separate confirmation step, so do not call it until they've actually agreed to a specific time.
+4. After book_meeting succeeds, confirm the day/time back to them and let them know someone will call them at that time.
+5. If a prospect who already has a meeting booked wants to move or drop it, use reschedule_meeting (after check_availability finds a new slot) or cancel_meeting.
 
 VARIABLES AVAILABLE AT CALL TIME:
 - {{lead_name}} - prospect's full name

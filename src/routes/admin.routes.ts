@@ -73,4 +73,28 @@ router.post('/organizations/:id/impersonate', async (req: AuthenticatedRequest, 
   }
 });
 
+router.get('/settings/auto-provision-phone', async (_req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json({ enabled: await adminService.getAutoProvisionPhoneSetting() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/settings/auto-provision-phone', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await adminService.setAutoProvisionPhoneSetting(!!req.body.enabled, req.user.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/organizations/:id/provision-phone', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await adminService.provisionPhoneForOrganization(req.params.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;

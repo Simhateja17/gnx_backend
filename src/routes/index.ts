@@ -2,6 +2,7 @@ import { Router } from 'express';
 import authRoutes from './auth.routes';
 import onboardingRoutes from './onboarding.routes';
 import gmailRoutes from './gmail.routes';
+import smtpRoutes from './smtp.routes';
 import campaignsRoutes from './campaigns.routes';
 import leadsRoutes from './leads.routes';
 import emailsRoutes from './emails.routes';
@@ -20,12 +21,14 @@ import meetingsRoutes from './meetings.routes';
 import calendarRoutes from './calendar.routes';
 import agentRoutes from './agent.routes';
 import setupRoutes from './setup.routes';
+import apolloRoutes from './apollo.routes';
 
 const router = Router();
 
 router.use('/auth', authRoutes);
 router.use('/onboarding', onboardingRoutes);
 router.use('/gmail', gmailRoutes);
+router.use('/smtp', smtpRoutes);
 router.use('/campaigns', campaignsRoutes);
 router.use('/leads', leadsRoutes);
 router.use('/emails', emailsRoutes);
@@ -44,5 +47,6 @@ router.use('/meetings', meetingsRoutes);
 router.use('/calendar', calendarRoutes);
 router.use('/agent', agentRoutes);
 router.use('/setup', setupRoutes);
+router.use('/apollo', apolloRoutes);
 
 export default router;

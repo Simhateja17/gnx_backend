@@ -94,7 +94,7 @@ function resetDb() {
 
   db.org_setup_progress = [];
   db.connected_accounts = [];
-  db.calendar_connections = [];
+  db.calendar_settings = [];
   db.retell_phone_numbers = [];
   db.agent_configs = [];
   db.leads = [];
@@ -129,7 +129,6 @@ describe('integration state handling', () => {
     const integrations = await getIntegrationStates(ORG);
 
     expect(integrations.gmail.connected).toBe(false);
-    expect(integrations.calendar.connected).toBe(false);
     expect(integrations.retell.connected).toBe(false);
     expect(integrations.apollo.connected).toBe(false);
     expect(integrations.gmail.label).toBeNull();
@@ -147,21 +146,6 @@ describe('integration state handling', () => {
 
     expect(gmail.connected).toBe(true);
     expect(gmail.label).toBe('sales@globonexo.com');
-  });
-
-  it('treats a calendar row missing its tokens as not connected', async () => {
-    db.calendar_connections = [{
-      organization_id: ORG,
-      provider: 'google',
-      status: 'connected',
-      connected_email: 'sales@globonexo.com',
-      access_token: null,
-      refresh_token: null,
-    }];
-
-    const { calendar } = await getIntegrationStates(ORG);
-
-    expect(calendar.connected).toBe(false);
   });
 
   it('distinguishes a provisioning number from an active one', async () => {
@@ -236,6 +220,28 @@ describe('setup step derivation', () => {
     expect(summary.nextStepId).toBe('gmail');
     expect(summary.total).toBe(steps.length - 2);
     expect(summary.allRequiredComplete).toBe(false);
+  });
+});
+
+describe('availability step', () => {
+  it('stays incomplete on the auto-created default row until the customer explicitly saves', async () => {
+    seedCompleteOnboarding();
+    // Mirrors calendar.service's getCalendarSettings auto-insert: a row exists
+    // with generic defaults, but is_configured is only ever flipped by a PUT.
+    db.calendar_settings = [{ organization_id: ORG, is_configured: false }];
+
+    const { steps } = await getSetupState(ORG);
+
+    expect(stepById(steps, 'calendar').status).toBe('incomplete');
+  });
+
+  it('completes once the customer has explicitly saved availability', async () => {
+    seedCompleteOnboarding();
+    db.calendar_settings = [{ organization_id: ORG, is_configured: true }];
+
+    const { steps } = await getSetupState(ORG);
+
+    expect(stepById(steps, 'calendar').status).toBe('complete');
   });
 });
 

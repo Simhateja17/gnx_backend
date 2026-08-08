@@ -37,7 +37,18 @@ All authenticated endpoints require the HTTP-only session cookie set by `/api/au
 | GET | `/gmail/auth-url` | Get Google OAuth URL | Poojitha |
 | POST | `/gmail/callback` | OAuth callback, store tokens | Poojitha |
 | GET | `/gmail/status` | Check Gmail connection | Poojitha |
+| POST | `/gmail/activate` | Make the saved Gmail account the active email provider | Poojitha |
 | DELETE | `/gmail/disconnect` | Remove Gmail connection | Poojitha |
+
+## Custom email
+
+| Method | Path | Purpose | Owner |
+|---|---|---|---|
+| GET | `/smtp/status` | List safe status for saved Gmail/SMTP email connections | Poojitha |
+| POST | `/smtp/test` | Verify SMTP sending and IMAP reply access without saving credentials | Poojitha |
+| POST | `/smtp/connect` | Verify and save an encrypted custom SMTP + IMAP connection | Poojitha |
+| POST | `/smtp/activate` | Make the saved custom mailbox the active email provider | Poojitha |
+| DELETE | `/smtp/disconnect` | Remove the custom mailbox connection | Poojitha |
 
 ---
 

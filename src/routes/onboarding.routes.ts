@@ -4,7 +4,10 @@ import { requireActiveSubscription } from '../middleware/billing.middleware';
 import { validate } from '../middleware/validate.middleware';
 import { onboardingPostSchema, onboardingPutSchema } from '../schemas/onboarding.schema';
 import { submitOnboarding, getOnboarding } from '../services/onboarding.service';
-import { getOnboardingPreparation } from '../services/onboarding-preparation.service';
+import {
+  getCurrentOnboardingPreparation,
+  getOnboardingPreparation,
+} from '../services/onboarding-preparation.service';
 import { AppError } from '../types';
 
 const router = Router();
@@ -26,6 +29,14 @@ router.get('/preparation', async (req: AuthenticatedRequest, res: Response, next
     const campaignId = typeof req.query.campaignId === 'string' ? req.query.campaignId : '';
     if (!campaignId) throw new AppError(400, 'campaignId is required');
     res.json(await getOnboardingPreparation(req.organization.id, campaignId));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/preparation/current', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    res.json(await getCurrentOnboardingPreparation(req.organization.id));
   } catch (err) {
     next(err);
   }

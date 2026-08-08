@@ -3,14 +3,21 @@ import { supabase } from '../lib/supabase';
 import { AppError } from '../types';
 import {
   ONBOARDING_APOLLO_MAX_CANDIDATES,
-  ONBOARDING_APOLLO_MAX_SEARCH_PAGES,
   ONBOARDING_ENRICHED_LEAD_TARGET,
 } from '../config/constants';
-import { enrichLeads, searchApollo } from './leads.service';
+import { runApolloImport } from './apollo-import.service';
 
 const PREPARATION_TTL_SECONDS = 24 * 60 * 60;
 
-export type OnboardingPreparationStatus = 'idle' | 'queued' | 'preparing' | 'ready' | 'attention';
+// 'partial' is a legitimate outcome, not a degraded 'attention': Apollo may
+// simply not hold enough verified people for a given profile.
+export type OnboardingPreparationStatus =
+  | 'idle'
+  | 'queued'
+  | 'preparing'
+  | 'ready'
+  | 'partial'
+  | 'attention';
 
 export type OnboardingPreparationProgress = {
   status: OnboardingPreparationStatus;
@@ -22,7 +29,9 @@ export type OnboardingPreparationProgress = {
   reused: number;
   skippedDuplicates: number;
   failed: number;
+  rejected: number;
   searchPages: number;
+  importRunId: string | null;
   error: string | null;
   updatedAt: string;
 };
@@ -59,7 +68,9 @@ function emptyProgress(targetEnriched = ONBOARDING_ENRICHED_LEAD_TARGET): Onboar
     reused: 0,
     skippedDuplicates: 0,
     failed: 0,
+    rejected: 0,
     searchPages: 0,
+    importRunId: null,
     error: null,
     updatedAt: new Date().toISOString(),
   };
@@ -113,51 +124,19 @@ async function readCampaignLeadCounts(organizationId: string, campaignId: string
   };
 }
 
-async function readPendingApolloLeadIds(organizationId: string, campaignId: string, limit: number) {
-  const { data, error } = await supabase
-    .from('leads')
-    .select('id')
-    .eq('organization_id', organizationId)
-    .eq('campaign_id', campaignId)
-    .eq('source', 'apollo')
-    .is('last_apollo_enriched_at', null)
-    .neq('status', 'enrichment_failed')
-    .limit(limit);
-
-  if (error) throw new AppError(500, 'Failed to read pending onboarding Apollo leads', error);
-  return (data ?? []).map(lead => lead.id);
-}
-
-async function readPendingApolloLeadIdsForCandidates(
-  organizationId: string,
-  campaignId: string,
-  candidateIds: string[],
-) {
-  if (candidateIds.length === 0) return [];
-
-  const { data, error } = await supabase
-    .from('leads')
-    .select('id')
-    .eq('organization_id', organizationId)
-    .eq('campaign_id', campaignId)
-    .eq('source', 'apollo')
-    .is('last_apollo_enriched_at', null)
-    .neq('status', 'enrichment_failed')
-    .in('id', candidateIds);
-
-  if (error) throw new AppError(500, 'Failed to read candidate onboarding Apollo leads', error);
-  return (data ?? []).map(lead => lead.id);
-}
-
-function finalError(progress: OnboardingPreparationProgress, matchesReturned: number) {
-  if (progress.enriched >= progress.targetEnriched) return null;
-  if (matchesReturned === 0 && progress.enriched === 0) {
-    return 'Apollo found no people matching this ICP. Broaden the titles, industries, company sizes, or locations and retry.';
+/**
+ * Message for a run that qualified nobody.
+ *
+ * Distinguishes "Apollo has no such people" from "Apollo had people but none
+ * were contactable", because those send the customer to different fixes:
+ * broaden the profile, versus loosen the email policy or accept the niche is
+ * hard to reach.
+ */
+function noMatchesError(progress: OnboardingPreparationProgress) {
+  if (progress.candidatesFound === 0) {
+    return 'Apollo found no people matching this profile. Broaden the titles, industries, company sizes, or locations and try again.';
   }
-  if (progress.candidatesAttempted >= ONBOARDING_APOLLO_MAX_CANDIDATES) {
-    return `Apollo prepared ${progress.enriched} enriched leads, but the onboarding safety limit was reached before ${progress.targetEnriched}. Retry after refining the ICP.`;
-  }
-  return `Apollo prepared ${progress.enriched} enriched leads, but did not return enough usable matches to reach ${progress.targetEnriched}. Retry after refining the ICP.`;
+  return `Apollo found ${progress.candidatesFound} people, but none had a verified work email. Broaden the profile, or loosen the email policy in Settings if this market is hard to verify.`;
 }
 
 export async function prepareApolloLeadsForCampaign(criteria: OnboardingPreparationCriteria) {
@@ -165,98 +144,66 @@ export async function prepareApolloLeadsForCampaign(criteria: OnboardingPreparat
     1,
     Math.min(criteria.targetEnriched ?? ONBOARDING_ENRICHED_LEAD_TARGET, ONBOARDING_ENRICHED_LEAD_TARGET),
   );
+
   const progress: OnboardingPreparationProgress = {
     ...emptyProgress(targetEnriched),
     status: 'preparing',
   };
-
   await setOnboardingPreparationProgress(progress, criteria.campaignId);
 
-  const initialCounts = await readCampaignLeadCounts(criteria.organizationId, criteria.campaignId);
-  progress.enriched = initialCounts.enriched;
-  progress.failed = initialCounts.failed;
-  progress.candidatesFound = initialCounts.attached;
-  await setOnboardingPreparationProgress(progress, criteria.campaignId);
+  console.log(`[onboarding-apollo] starting campaign ${criteria.campaignId} for ${targetEnriched} qualified leads`);
 
-  // A repeated onboarding request should finish enriching any candidates that
-  // were already attached before searching Apollo for more.
-  const initialPendingIds = await readPendingApolloLeadIds(
-    criteria.organizationId,
-    criteria.campaignId,
-    ONBOARDING_APOLLO_MAX_CANDIDATES,
-  );
-  if (initialPendingIds.length > 0 && progress.enriched < targetEnriched) {
-    progress.candidatesAttempted += initialPendingIds.length;
-    await setOnboardingPreparationProgress(progress, criteria.campaignId);
-    await enrichLeads(criteria.organizationId, initialPendingIds, criteria.campaignId);
-    const counts = await readCampaignLeadCounts(criteria.organizationId, criteria.campaignId);
-    progress.enriched = counts.enriched;
-    progress.failed = counts.failed;
-    await setOnboardingPreparationProgress(progress, criteria.campaignId);
-  }
-
-  let lastMatchesReturned = 0;
-  const attemptedLeadIds = new Set(initialPendingIds);
-
-  for (
-    let page = 1;
-    page <= ONBOARDING_APOLLO_MAX_SEARCH_PAGES
-      && progress.enriched < targetEnriched
-      && progress.candidatesAttempted < ONBOARDING_APOLLO_MAX_CANDIDATES;
-    page++
-  ) {
-    const result = await searchApollo(criteria.organizationId, {
+  try {
+    const run = await runApolloImport({
+      organizationId: criteria.organizationId,
       campaignId: criteria.campaignId,
       titles: criteria.titles,
       locations: criteria.locations,
       companySizes: criteria.companySizes,
       keywords: criteria.keywords,
-      page,
-      perPage: 100,
+      limit: targetEnriched,
+      candidateCap: ONBOARDING_APOLLO_MAX_CANDIDATES,
     });
 
-    progress.searchPages = page;
-    lastMatchesReturned = result.matchesReturned;
-    progress.inserted += result.inserted;
-    progress.reused += result.reused;
-    progress.skippedDuplicates += result.skipped;
+    const qualified = Number(run.qualified_count ?? 0);
 
-    const candidateIds = [...new Set(result.candidateIds.filter(id => !attemptedLeadIds.has(id)))];
-    progress.candidatesFound += candidateIds.length;
-    // Mark every candidate as seen, including leads that were already
-    // enriched. The preparation loop must not spend another enrichment call
-    // on a lead merely because Apollo returned it on a later page.
-    candidateIds.forEach(id => attemptedLeadIds.add(id));
-    const remainingCandidateBudget = ONBOARDING_APOLLO_MAX_CANDIDATES - progress.candidatesAttempted;
-    const pendingCandidateIds = await readPendingApolloLeadIdsForCandidates(
-      criteria.organizationId,
-      criteria.campaignId,
-      candidateIds,
-    );
-    const idsToEnrich = pendingCandidateIds.slice(0, remainingCandidateBudget);
+    progress.enriched = qualified;
+    progress.candidatesFound = Number(run.candidates_found ?? 0);
+    progress.candidatesAttempted = Number(run.candidates_attempted ?? 0);
+    progress.skippedDuplicates = Number(run.duplicate_count ?? 0);
+    progress.rejected = Number(run.rejected_count ?? 0);
+    progress.failed = Number(run.failed_count ?? 0);
+    progress.searchPages = Number(run.pages_searched ?? 0);
+    progress.importRunId = run.id;
 
-    if (idsToEnrich.length > 0) {
-      progress.candidatesAttempted += idsToEnrich.length;
-      await setOnboardingPreparationProgress(progress, criteria.campaignId);
-      await enrichLeads(criteria.organizationId, idsToEnrich, criteria.campaignId);
-    }
+    // 'partial' is a real outcome, not a failure: Apollo may simply not hold
+    // enough verified people for this ICP. Only a run that found nobody at all
+    // is worth raising as needing attention.
+    progress.status = qualified >= targetEnriched
+      ? 'ready'
+      : qualified > 0
+        ? 'partial'
+        : 'attention';
 
-    const counts = await readCampaignLeadCounts(criteria.organizationId, criteria.campaignId);
-    progress.enriched = counts.enriched;
-    progress.failed = counts.failed;
+    progress.error = qualified === 0 ? noMatchesError(progress) : null;
+    progress.updatedAt = new Date().toISOString();
     await setOnboardingPreparationProgress(progress, criteria.campaignId);
 
-    if (result.matchesReturned === 0) break;
-  }
+    console.log(
+      `[onboarding-apollo] campaign ${criteria.campaignId} finished ${run.status}: ` +
+      `${qualified}/${targetEnriched} qualified, ${progress.rejected} filtered out`
+    );
 
-  const finalCounts = await readCampaignLeadCounts(criteria.organizationId, criteria.campaignId);
-  progress.enriched = finalCounts.enriched;
-  progress.failed = finalCounts.failed;
-  progress.status = progress.enriched >= targetEnriched ? 'ready' : 'attention';
-  progress.error = finalError(progress, lastMatchesReturned);
-  progress.updatedAt = new Date().toISOString();
-  await setOnboardingPreparationProgress(progress, criteria.campaignId);
-  return progress;
+    // Generation is queued by the import worker once the run completes, so a
+    // customer arriving at the campaign finds emails already being written.
+    return { ...progress, targetEnriched };
+  } catch (error) {
+    progress.status = 'attention';
+    progress.error = error instanceof Error ? error.message : 'Apollo preparation failed';
+    progress.updatedAt = new Date().toISOString();
+    await setOnboardingPreparationProgress(progress, criteria.campaignId);
+    throw error;
+  }
 }
 
 export async function getOnboardingPreparation(organizationId: string, campaignId: string) {
@@ -281,6 +228,7 @@ export async function getOnboardingPreparation(organizationId: string, campaignI
 
   return {
     ...progress,
+    campaignId,
     status,
     enriched: counts.enriched,
     attached: counts.attached,
@@ -288,4 +236,17 @@ export async function getOnboardingPreparation(organizationId: string, campaignI
     failed: counts.failed,
     updatedAt: new Date().toISOString(),
   };
+}
+
+export async function getCurrentOnboardingPreparation(organizationId: string) {
+  const { data: agentConfig, error } = await supabase
+    .from('agent_configs')
+    .select('onboarding_campaign_id')
+    .eq('organization_id', organizationId)
+    .maybeSingle();
+
+  if (error) throw new AppError(500, 'Failed to find the onboarding campaign', error);
+  if (!agentConfig?.onboarding_campaign_id) return null;
+
+  return getOnboardingPreparation(organizationId, agentConfig.onboarding_campaign_id);
 }

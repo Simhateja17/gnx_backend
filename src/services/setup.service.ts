@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { env } from '../config/env';
 import { AppError } from '../types';
+import { isCalendarConfigured } from './calendar.service';
 
 /**
  * Guided setup state for an organization.
@@ -24,6 +25,7 @@ export const SETUP_STEP_IDS = [
   'retell',
   'leads',
   'campaign',
+  'review_drafts',
   'launch',
 ] as const;
 
@@ -82,7 +84,8 @@ const STEP_DEPENDENCIES: Record<SetupStepId, SetupStepId[]> = {
   retell: [],
   leads: [],
   campaign: ['leads'],
-  launch: ['campaign'],
+  review_drafts: ['campaign'],
+  launch: ['review_drafts'],
 };
 
 // ---------------------------------------------------------------------------
@@ -168,7 +171,6 @@ export type IntegrationState = {
 
 export type IntegrationStates = {
   gmail: IntegrationState;
-  calendar: IntegrationState;
   apollo: IntegrationState;
   retell: IntegrationState & { phoneNumber: string | null; agentReady: boolean };
 };
@@ -212,19 +214,13 @@ function isFilled(value: unknown, minLength = 1): boolean {
 }
 
 export async function getIntegrationStates(organizationId: string): Promise<IntegrationStates> {
-  const [gmailResult, calendarResult, phoneResult, agentConfigResult, apolloLeadResult] = await Promise.all([
+  const [gmailResult, phoneResult, agentConfigResult, apolloLeadResult] = await Promise.all([
     supabase
       .from('connected_accounts')
-      .select('provider_account_id,expires_at')
+      .select('provider,provider_account_id,is_active,updated_at')
       .eq('organization_id', organizationId)
-      .eq('provider', 'gmail')
-      .maybeSingle(),
-    supabase
-      .from('calendar_connections')
-      .select('connected_email,status,selected_calendar_name,timezone,last_error,access_token,refresh_token')
-      .eq('organization_id', organizationId)
-      .eq('provider', 'google')
-      .maybeSingle(),
+      .in('provider', ['gmail', 'smtp'])
+      .order('updated_at', { ascending: false }),
     supabase
       .from('retell_phone_numbers')
       .select('phone_number,status,error_message')
@@ -242,50 +238,25 @@ export async function getIntegrationStates(organizationId: string): Promise<Inte
       .eq('source', 'apollo'),
   ]);
 
-  const gmailRow = gmailResult.data;
+  const emailRows = (gmailResult.data ?? []) as Array<{
+    provider: 'gmail' | 'smtp';
+    provider_account_id: string | null;
+    is_active: boolean | null;
+  }>;
+  const gmailRow = emailRows.find(row => row.is_active !== false) ?? emailRows[0] ?? null;
+  const emailProviderLabel = gmailRow?.provider === 'smtp' ? 'Custom SMTP' : 'Gmail';
   const gmail: IntegrationState = gmailRow
     ? {
         connected: true,
         status: 'connected',
         label: gmailRow.provider_account_id ?? null,
-        detail: `Sending from ${gmailRow.provider_account_id ?? 'the connected mailbox'}.`,
+        detail: `Sending from ${gmailRow.provider_account_id ?? 'the connected mailbox'} via ${emailProviderLabel}.`,
       }
     : {
         connected: false,
         status: 'disconnected',
         label: null,
-        detail: 'Gmail is not connected yet. Emails cannot be sent until it is.',
-      };
-
-  const calendarRow = calendarResult.data as
-    | {
-        connected_email: string | null;
-        status: string | null;
-        selected_calendar_name: string | null;
-        timezone: string | null;
-        last_error: string | null;
-        access_token: string | null;
-        refresh_token: string | null;
-      }
-    | null;
-
-  const calendarConnected = Boolean(
-    calendarRow && calendarRow.status === 'connected' && calendarRow.access_token && calendarRow.refresh_token,
-  );
-  const calendar: IntegrationState = calendarConnected
-    ? {
-        connected: true,
-        status: 'connected',
-        label: calendarRow?.connected_email ?? null,
-        detail: `Booking into ${calendarRow?.selected_calendar_name || 'the primary calendar'} (${calendarRow?.timezone || 'UTC'}).`,
-      }
-    : {
-        connected: false,
-        status: calendarRow?.status === 'error' ? 'error' : 'disconnected',
-        label: calendarRow?.connected_email ?? null,
-        detail: calendarRow?.status === 'error'
-          ? 'Google Calendar needs to be reconnected before meetings can be booked.'
-          : 'Google Calendar is not connected. Meetings still appear here, but the agent cannot book slots.',
+        detail: 'No email account is connected yet. Connect Gmail or a custom SMTP/IMAP mailbox before sending.',
       };
 
   const apolloEnrichedCount = apolloLeadResult.count ?? 0;
@@ -350,7 +321,7 @@ export async function getIntegrationStates(organizationId: string): Promise<Inte
     agentReady: Boolean(retellAgentId),
   };
 
-  return { gmail, calendar, apollo, retell };
+  return { gmail, apollo, retell };
 }
 
 // ---------------------------------------------------------------------------
@@ -392,10 +363,11 @@ export function summarizeSteps(steps: SetupStep[]): SetupSummary {
 }
 
 export async function getSetupState(organizationId: string): Promise<SetupState> {
-  const [progress, integrations, agentConfigResult, leadsResult, campaignsResult, activeCampaignsResult] =
+  const [progress, integrations, calendarConfigured, agentConfigResult, leadsResult, campaignsResult, activeCampaignsResult, messagesResult] =
     await Promise.all([
       loadProgressRow(organizationId),
       getIntegrationStates(organizationId),
+      isCalendarConfigured(organizationId),
       supabase
         .from('agent_configs')
         .select(AGENT_CONFIG_COLUMNS)
@@ -414,12 +386,25 @@ export async function getSetupState(organizationId: string): Promise<SetupState>
         .select('id', { count: 'exact', head: true })
         .eq('organization_id', organizationId)
         .eq('status', 'active'),
+      // Approval state. One approved email completes the step: the point is
+      // that the customer has read what the agent writes, and autopilot exists
+      // precisely so they need not approve all thirty by hand.
+      supabase
+        .from('email_messages')
+        .select('status')
+        .eq('organization_id', organizationId)
+        .in('status', ['draft', 'approved', 'queued', 'sent']),
     ]);
 
   const config = (agentConfigResult.data ?? null) as AgentConfigRow | null;
   const leadCount = leadsResult.count ?? 0;
   const campaignCount = campaignsResult.count ?? 0;
   const activeCampaignCount = activeCampaignsResult.count ?? 0;
+  const messageRows = messagesResult.data ?? [];
+  const approvedMessageCount = messageRows.filter(
+    row => row.status === 'approved' || row.status === 'queued' || row.status === 'sent',
+  ).length;
+  const draftMessageCount = messageRows.filter(row => row.status === 'draft').length;
 
   const derived: Record<SetupStepId, { status: SetupStepStatus; detail: string }> = {
     profile: isFilled(config?.first_name) && isFilled(config?.company)
@@ -445,12 +430,9 @@ export async function getSetupState(organizationId: string): Promise<SetupState>
       ? { status: 'complete', detail: integrations.gmail.detail }
       : { status: 'incomplete', detail: integrations.gmail.detail },
 
-    calendar: integrations.calendar.connected
-      ? { status: 'complete', detail: integrations.calendar.detail }
-      : {
-          status: integrations.calendar.status === 'error' ? 'blocked' : 'incomplete',
-          detail: integrations.calendar.detail,
-        },
+    calendar: calendarConfigured
+      ? { status: 'complete', detail: 'Working hours, meeting length, and notice window are set.' }
+      : { status: 'incomplete', detail: 'Confirm your working hours and timezone so the agent books real slots, not guessed ones.' },
 
     apollo: integrations.apollo.status === 'not_configured'
       ? { status: 'unavailable', detail: integrations.apollo.detail }
@@ -474,6 +456,21 @@ export async function getSetupState(organizationId: string): Promise<SetupState>
     campaign: campaignCount > 0
       ? { status: 'complete', detail: `${campaignCount} campaign${campaignCount === 1 ? '' : 's'} created.` }
       : { status: 'incomplete', detail: 'Build your first campaign with the Setup Copilot.' },
+
+    review_drafts: approvedMessageCount > 0
+      ? {
+          status: 'complete',
+          detail: `${approvedMessageCount} email${approvedMessageCount === 1 ? '' : 's'} approved and ready to send.`,
+        }
+      : draftMessageCount > 0
+        ? {
+            status: 'incomplete',
+            detail: `${draftMessageCount} draft${draftMessageCount === 1 ? '' : 's'} waiting for review. Approve one, or turn on autopilot to approve them all.`,
+          }
+        : {
+            status: 'incomplete',
+            detail: 'Emails are written automatically once your leads finish enriching.',
+          },
 
     launch: activeCampaignCount > 0
       ? { status: 'complete', detail: `${activeCampaignCount} campaign${activeCampaignCount === 1 ? '' : 's'} running.` }

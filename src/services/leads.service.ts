@@ -6,6 +6,7 @@ import { sendEmail } from './email.service';
 import { enqueueInitialEmailStepIfActive } from './campaigns.service';
 import { APOLLO_ENRICHMENT_CAP, AGENT_ICP_SEARCH_MAX_LEADS, AGENT_ICP_SEARCH_MAX_ATTEMPTS } from '../config/constants';
 import { matchApolloPerson, searchApolloPeople } from '../lib/apollo';
+import type { ApolloRequestContext } from '../lib/apollo';
 import { ensureAgentConfig } from './agent-config.service';
 import {
   apolloWebhookExpected,
@@ -385,7 +386,11 @@ export async function searchApollo(orgId: string, input: ApolloSearchInput) {
   });
 
   try {
-    const data = await searchApolloPeople(body) as {
+    const data = await searchApolloPeople(body, {
+      organizationId: orgId,
+      campaignId: input.campaignId,
+      enrichmentRunId: run.id,
+    }) as {
     people?: ApolloPerson[];
     contacts?: ApolloPerson[];
     pagination?: { page?: number; per_page?: number; total_entries?: number; total_pages?: number };
@@ -668,7 +673,13 @@ export async function enrichLead(orgId: string, input: ApolloEnrichInput) {
   });
 
   try {
-    const result = await matchApolloPerson(enrichBody) as {
+    const apolloContext: ApolloRequestContext = {
+      organizationId: orgId,
+      campaignId: row.campaign_id,
+      leadId: input.leadId,
+      enrichmentRunId: run.id,
+    };
+    const result = await matchApolloPerson(enrichBody, apolloContext) as {
       person?: ApolloPerson;
       request_id?: string;
       waterfall?: Record<string, unknown>;
@@ -685,7 +696,7 @@ export async function enrichLead(orgId: string, input: ApolloEnrichInput) {
       throw new AppError(404, 'No enrichment data found for this lead');
     }
 
-    const organization = await enrichOrganizationForPerson(person);
+    const organization = await enrichOrganizationForPerson(person, apolloContext);
     const persisted = await persistApolloPersonToLead(orgId, input.leadId, person, organization);
     await completeApolloEnrichmentRun(orgId, run.id, {
       providerRequestId: result.request_id == null ? null : String(result.request_id),
@@ -867,7 +878,12 @@ export async function enrichLeads(
         webhookExpected: apolloWebhookExpected(),
       });
 
-      const data = await matchApolloPerson(enrichBody) as { person?: ApolloPerson; request_id?: string };
+      const data = await matchApolloPerson(enrichBody, {
+        organizationId,
+        campaignId,
+        leadId: lead.id,
+        enrichmentRunId: run?.id,
+      }) as { person?: ApolloPerson; request_id?: string };
       const person = data.person;
       if (!person) {
         if (run) await failApolloEnrichmentRun(organizationId, run.id, 'no_match', 'No enrichment data found', data);

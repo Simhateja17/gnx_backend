@@ -9,7 +9,8 @@ import { sendBillingReminderEmail } from '../lib/resend';
 import { posthog } from '../lib/posthog';
 import { env } from '../config/env';
 import { AppError } from '../types';
-import { provisionIncludedRetellPhoneNumber } from './retell-phone.service';
+import { provisionIncludedRetellPhoneNumber, ensurePhoneProvisioningRequested } from './retell-phone.service';
+import { isAutoProvisionPhoneEnabled } from './settings.service';
 
 export type PlanId = 'starter' | 'growth' | 'scale';
 export type BillingPeriod = 'monthly' | 'annual';
@@ -258,6 +259,10 @@ async function applySubscriptionEvent(input: SubscriptionEventInput) {
 
 async function provisionPhoneAfterPaidSubscription(organizationId: string) {
   try {
+    if (!(await isAutoProvisionPhoneEnabled())) {
+      await ensurePhoneProvisioningRequested(organizationId);
+      return { status: 'requested' as const, reason: 'auto_provisioning_disabled' };
+    }
     return await provisionIncludedRetellPhoneNumber(organizationId);
   } catch (error: any) {
     // Billing must remain successful even if Retell is temporarily unavailable.

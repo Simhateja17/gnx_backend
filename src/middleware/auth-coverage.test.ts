@@ -19,6 +19,7 @@ const routeChecks: Array<{ file: string; method: 'get' | 'post'; path: string; e
   { file: 'auth.routes.ts',       method: 'get', path: '/api/auth/me',              expectAuthedStatus: 200 },
   { file: 'onboarding.routes.ts', method: 'get', path: '/api/onboarding',           expectAuthedStatus: 200 },
   { file: 'gmail.routes.ts',      method: 'get', path: '/api/gmail/status',         expectAuthedStatus: 200 },
+  { file: 'smtp.routes.ts',       method: 'get', path: '/api/smtp/status' },
   { file: 'campaigns.routes.ts',  method: 'get', path: '/api/campaigns' },
   { file: 'leads.routes.ts',      method: 'get', path: '/api/leads' },
   { file: 'emails.routes.ts',     method: 'get', path: '/api/emails/send-cap' },

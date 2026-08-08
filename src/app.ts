@@ -10,6 +10,7 @@ import routes from './routes';
 import * as voiceService from './services/voice.service';
 import * as billingService from './services/billing.service';
 import { handleApolloWebhook } from './services/apollo-webhook.service';
+import { handleRetellTool } from './services/retell-tools.service';
 
 export const app = express();
 
@@ -50,7 +51,12 @@ app.post('/webhooks/razorpay', webhookRateLimiter, express.raw({ type: 'applicat
 
 // Apollo does not provide a signed webhook header for phone/waterfall
 // enrichment. Require the account-owned secret before accepting the callback.
-app.post('/webhooks/apollo', webhookRateLimiter, express.json(), async (req, res) => {
+//
+// Two paths, one handler: /api/apollo/webhook is the documented contract, and
+// /webhooks/apollo is what already-configured Apollo callbacks point at.
+// Retiring the old path would strand enrichment results in flight, and the
+// handler is idempotent either way.
+app.post(['/webhooks/apollo', '/api/apollo/webhook'], webhookRateLimiter, express.json(), async (req, res) => {
   const configuredSecret = env.APOLLO_ENRICHMENT_WEBHOOK_SECRET;
   const querySecret = typeof req.query.secret === 'string' ? req.query.secret : '';
   const headerSecret = typeof req.headers['x-apollo-webhook-secret'] === 'string'
@@ -63,6 +69,24 @@ app.post('/webhooks/apollo', webhookRateLimiter, express.json(), async (req, res
 
   try {
     res.json(await handleApolloWebhook(req.body));
+  } catch (err: any) {
+    res.status(err.status ?? 500).json({ error: err.message });
+  }
+});
+
+// Retell custom-function tools - invoked live, mid-call, by Retell's
+// servers (not the browser), so this is secret-header authenticated rather
+// than session authenticated, same pattern as the Apollo webhook above.
+app.post('/webhooks/retell/tools/:toolName', webhookRateLimiter, express.json(), async (req, res) => {
+  const configuredSecret = env.RETELL_TOOL_SECRET;
+  const headerSecret = typeof req.headers['x-tool-secret'] === 'string' ? req.headers['x-tool-secret'] : '';
+  if (!configuredSecret || headerSecret !== configuredSecret) {
+    res.status(401).json({ error: 'Invalid tool secret' });
+    return;
+  }
+
+  try {
+    res.json(await handleRetellTool(req.params.toolName, req.body));
   } catch (err: any) {
     res.status(err.status ?? 500).json({ error: err.message });
   }
