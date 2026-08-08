@@ -39,6 +39,23 @@ function mapSettings(row: CalendarSettingsRow): CalendarSettings {
   };
 }
 
+/**
+ * Whether the customer has ever explicitly saved availability, as opposed to
+ * the row that's silently auto-created with generic defaults the first time
+ * anything reads calendar_settings. Used to gate the setup checklist and
+ * product tour — the agent can already book on the defaults, but a wrong
+ * default timezone booking meetings at 3am is worth blocking on.
+ */
+export async function isCalendarConfigured(organizationId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('calendar_settings')
+    .select('is_configured')
+    .eq('organization_id', organizationId)
+    .maybeSingle();
+  if (error) throw new AppError(500, 'Failed to check availability status', error);
+  return Boolean((data as { is_configured: boolean } | null)?.is_configured);
+}
+
 export async function getCalendarSettings(organizationId: string): Promise<CalendarSettings> {
   const { data, error } = await supabase
     .from('calendar_settings')
@@ -63,7 +80,9 @@ export async function updateCalendarSettings(
 ): Promise<CalendarSettings> {
   await getCalendarSettings(organizationId); // ensures the row exists before patching
 
-  const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  // Any explicit PUT — even one that re-saves the defaults unchanged — is the
+  // customer confirming this is right, which is what is_configured tracks.
+  const patch: Record<string, unknown> = { updated_at: new Date().toISOString(), is_configured: true };
   if (input.timezone !== undefined) patch.timezone = input.timezone;
   if (input.workingDays !== undefined) patch.working_days = input.workingDays;
   if (input.dayStartTime !== undefined) patch.day_start_time = input.dayStartTime;

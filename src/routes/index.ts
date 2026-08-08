@@ -21,6 +21,7 @@ import meetingsRoutes from './meetings.routes';
 import calendarRoutes from './calendar.routes';
 import agentRoutes from './agent.routes';
 import setupRoutes from './setup.routes';
+import apolloRoutes from './apollo.routes';
 
 const router = Router();
 
@@ -46,5 +47,6 @@ router.use('/meetings', meetingsRoutes);
 router.use('/calendar', calendarRoutes);
 router.use('/agent', agentRoutes);
 router.use('/setup', setupRoutes);
+router.use('/apollo', apolloRoutes);
 
 export default router;

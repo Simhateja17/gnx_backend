@@ -24,6 +24,11 @@ import type { PollInboxJobData } from '../jobs/poll-inbox.job';
 import type { ScheduleCallJobData } from '../jobs/schedule-call.job';
 import type { EnrichLeadsJobData } from '../jobs/enrich-leads.job';
 import type { CsvImportJobData } from '../jobs/csv-import.job';
+import type { ApolloImportJobData } from '../jobs/apollo-import.job';
+import type { CampaignGenerationJobData } from '../jobs/campaign-generation.job';
+import { enqueueCampaignGeneration } from '../jobs/campaign-generation.job';
+import { runApolloImport } from '../services/apollo-import.service';
+import { runCampaignGeneration } from '../services/campaign-generation.service';
 
 Sentry.init({
   dsn: env.SENTRY_DSN,
@@ -168,6 +173,40 @@ const csvImportWorker = new Worker<CsvImportJobData>('csv-import', async (job) =
   concurrency: 2,
 });
 
+const apolloImportWorker = new Worker<ApolloImportJobData>('apollo-import', async (job) => {
+  console.log(`[apollo-import] Processing job ${job.id} for org ${job.data.organizationId}`);
+  const run = await runApolloImport(job.data);
+  console.log(`[apollo-import] Job ${job.id} finished as ${run.status}: ${run.qualified_count} qualified`);
+
+  // Generation is auto-triggered: the customer never pressed a button, so the
+  // import handing off is the only thing that starts it. Queued even on a
+  // partial import - six qualified leads still deserve their emails.
+  if (job.data.campaignId && Number(run.qualified_count ?? 0) > 0) {
+    await enqueueCampaignGeneration({
+      organizationId: job.data.organizationId,
+      campaignId: job.data.campaignId,
+      importRunId: run.id,
+      trigger: 'leads_ready',
+    });
+  }
+
+  return run;
+}, {
+  connection: redisConnection,
+  // Imports are Apollo-credit-bearing and already parallel internally.
+  concurrency: 2,
+});
+
+const campaignGenerationWorker = new Worker<CampaignGenerationJobData>('campaign-generation', async (job) => {
+  console.log(`[campaign-generation] Processing job ${job.id} for campaign ${job.data.campaignId}`);
+  const result = await runCampaignGeneration(job.data);
+  console.log(`[campaign-generation] Job ${job.id} finished as ${result.status}: ${result.generated} drafts, ${result.failed} failed leads`);
+  return result;
+}, {
+  connection: redisConnection,
+  concurrency: 2,
+});
+
 const billingRenewalCheckWorker = new Worker('billing-renewal-check', async (job) => {
   console.log(`[billing-renewal-check] Processing job ${job.id}`);
   await runRenewalCheck();
@@ -190,6 +229,8 @@ scheduleCallWorker.on('failed', (job, err) => reportJobFailure('schedule-call', 
 enrichLeadsWorker.on('failed', (job, err) => reportJobFailure('enrich-leads', job, err));
 onboardingLeadsWorker.on('failed', (job, err) => reportJobFailure('onboarding-leads', job, err));
 csvImportWorker.on('failed', (job, err) => reportJobFailure('csv-import', job, err));
+apolloImportWorker.on('failed', (job, err) => reportJobFailure('apollo-import', job, err));
+campaignGenerationWorker.on('failed', (job, err) => reportJobFailure('campaign-generation', job, err));
 billingRenewalCheckWorker.on('failed', (job, err) => reportJobFailure('billing-renewal-check', job, err));
 
 // Workers are EventEmitters too — an unhandled 'error' (e.g. Redis dropping
@@ -204,9 +245,11 @@ scheduleCallWorker.on('error', (err) => reportConnectionError('schedule-call', e
 enrichLeadsWorker.on('error', (err) => reportConnectionError('enrich-leads', err));
 onboardingLeadsWorker.on('error', (err) => reportConnectionError('onboarding-leads', err));
 csvImportWorker.on('error', (err) => reportConnectionError('csv-import', err));
+apolloImportWorker.on('error', (err) => reportConnectionError('apollo-import', err));
+campaignGenerationWorker.on('error', (err) => reportConnectionError('campaign-generation', err));
 billingRenewalCheckWorker.on('error', (err) => reportConnectionError('billing-renewal-check', err));
 
-console.log('Workers started: send-email, poll-inbox, schedule-call, enrich-leads, onboarding-leads, csv-import, billing-renewal-check');
+console.log('Workers started: send-email, poll-inbox, schedule-call, enrich-leads, onboarding-leads, csv-import, apollo-import, campaign-generation, billing-renewal-check');
 
 void enqueueRecurringBillingRenewalCheck();
 
@@ -234,4 +277,13 @@ async function scheduleRecurringInboxPolls() {
 
 void scheduleRecurringInboxPolls();
 
-export { sendEmailWorker, pollInboxWorker, scheduleCallWorker, enrichLeadsWorker, csvImportWorker, billingRenewalCheckWorker };
+export {
+  sendEmailWorker,
+  pollInboxWorker,
+  scheduleCallWorker,
+  enrichLeadsWorker,
+  csvImportWorker,
+  apolloImportWorker,
+  campaignGenerationWorker,
+  billingRenewalCheckWorker,
+};

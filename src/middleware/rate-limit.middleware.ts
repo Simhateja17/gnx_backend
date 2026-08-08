@@ -32,3 +32,22 @@ export const webhookRateLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+// Provider callbacks can legitimately share one Retell egress IP across many
+// customer calls. These limits protect raw endpoint volume while per-caller
+// abuse and paid-minute budgets are enforced in the inbound service.
+export const retellInboundRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 900,
+  message: { error: 'Too many inbound webhook requests.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+export const retellToolRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 1200,
+  message: { error: 'Too many Retell tool requests.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});

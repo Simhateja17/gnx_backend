@@ -54,6 +54,26 @@ export const apolloEnrichSchema = z.object({
   leadId: z.string().uuid(),
 });
 
+/**
+ * Asynchronous Apollo import. Every targeting field is optional and falls back
+ * to the workspace ICP, so a business can define its own market rather than
+ * inheriting whatever the defaults happen to be.
+ */
+export const apolloImportSchema = z.object({
+  campaignId: z.string().uuid().optional(),
+  titles: z.array(z.string().trim().min(1).max(120)).max(20).optional(),
+  locations: z.array(z.string().trim().min(1).max(120)).max(20).optional(),
+  companySizes: z.array(z.string().trim().min(1).max(40)).max(12).optional(),
+  industries: z.array(z.string().trim().min(1).max(120)).max(20).optional(),
+  keywords: z.string().trim().max(240).optional(),
+  // Ceiling of 100 keeps a single import from consuming an entire plan's
+  // lead allowance in one call.
+  limit: z.coerce.number().int().min(1).max(100).default(10),
+  candidateCap: z.coerce.number().int().min(10).max(500).optional(),
+});
+
+export type ApolloImportInput = z.infer<typeof apolloImportSchema>;
+
 export type LeadCreateInput = z.infer<typeof leadCreateSchema>;
 export type ApolloSearchInput = z.infer<typeof apolloSearchSchema>;
 export type CsvUploadInput = z.infer<typeof csvUploadSchema>;

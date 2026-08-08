@@ -3,10 +3,12 @@ import { enqueueSendEmail } from '../jobs/send-email.job';
 import { enqueueScheduleCall } from '../jobs/schedule-call.job';
 import { posthog } from '../lib/posthog';
 import { AppError } from '../types';
+import { assertCampaignLaunchable } from './campaign-approval.service';
 import { ensureAgentConfig } from './agent-config.service';
 import { parsePromptContext, serializePromptContext } from '../lib/prompt-context';
 import type { AssignLeadsInput, CampaignCreateInput, CampaignUpdateInput, SequenceStepsUpsertInput } from '../schemas/campaigns.schema';
 import { normalizePhoneForCalling } from '../lib/phone';
+import { createOrUpdateRetellAgentForCampaign } from './voice.service';
 
 type CampaignChannel = 'email' | 'voice' | 'both';
 
@@ -29,6 +31,14 @@ type CampaignRow = {
   status: 'draft' | 'active' | 'paused' | 'completed';
   agent_config_id: string | null;
   prompt_context: string | null;
+  retell_agent_id: string | null;
+  retell_llm_id: string | null;
+  product_description: string | null;
+  value_proposition: string | null;
+  objections: string | null;
+  pain_points: string | null;
+  tone: string | null;
+  hook_style: string | null;
   max_leads: number;
   daily_send_cap: number;
   call_cadence_per_hour: number;
@@ -64,6 +74,14 @@ const CAMPAIGN_COLUMNS = [
   'status',
   'agent_config_id',
   'prompt_context',
+  'retell_agent_id',
+  'retell_llm_id',
+  'product_description',
+  'value_proposition',
+  'objections',
+  'pain_points',
+  'tone',
+  'hook_style',
   'max_leads',
   'daily_send_cap',
   'call_cadence_per_hour',
@@ -85,6 +103,12 @@ function toApiCampaign(row: CampaignRow, stats?: CampaignStats) {
     status: row.status,
     icpSource: prompt.icpSource,
     promptNotes: prompt.promptNotes,
+    productDescription: row.product_description,
+    valueProposition: row.value_proposition,
+    objections: row.objections,
+    painPoints: row.pain_points,
+    tone: row.tone,
+    hookStyle: row.hook_style,
     maxLeads: row.max_leads,
     dailySendCap: row.daily_send_cap,
     callCadencePerHour: row.call_cadence_per_hour,
@@ -96,11 +120,6 @@ function toApiCampaign(row: CampaignRow, stats?: CampaignStats) {
     updatedAt: row.updated_at,
     stats: stats ?? { enrolled: 0, ready: 0, missingEmail: 0, stopped: 0, queued: 0, sent: 0, meetings: 0 },
   };
-}
-
-async function getDefaultAgentConfigId(orgId: string) {
-  const config = await ensureAgentConfig(orgId);
-  return config.id;
 }
 
 async function getStatsByCampaign(orgId: string, campaignIds: string[]) {
@@ -187,14 +206,22 @@ export async function listCampaigns(orgId: string) {
 }
 
 export async function createCampaign(orgId: string, input: CampaignCreateInput) {
-  const agentConfigId = await getDefaultAgentConfigId(orgId);
+  const agentConfig = await ensureAgentConfig(orgId);
   const record = {
     organization_id: orgId,
     name: input.name,
     channel: input.channel,
     status: 'draft',
-    agent_config_id: agentConfigId,
+    agent_config_id: agentConfig.id,
     prompt_context: serializePromptContext(input),
+    // A new campaign starts pre-filled with the org's current pitch and can
+    // diverge from there once it has its own Retell agent.
+    product_description: input.productDescription ?? agentConfig.product_description,
+    value_proposition: input.valueProposition ?? agentConfig.value_proposition,
+    objections: input.objections ?? agentConfig.objections,
+    pain_points: input.painPoints ?? agentConfig.pain_points,
+    tone: input.tone ?? agentConfig.tone,
+    hook_style: input.hookStyle ?? agentConfig.hook_style,
     max_leads: input.maxLeads,
     daily_send_cap: input.dailySendCap,
     call_cadence_per_hour: input.callCadencePerHour,
@@ -202,6 +229,22 @@ export async function createCampaign(orgId: string, input: CampaignCreateInput) 
     business_hours_start: input.businessHoursStart,
     business_hours_end: input.businessHoursEnd,
     timezone: input.timezone,
+    // Copied from the org default at creation and never read from the org
+    // again, so the campaign page can always show what *this* campaign will
+    // do without the answer living somewhere the customer has to go find.
+    autopilot_enabled: agentConfig.autopilot_default === true,
+    autopilot_enabled_at: agentConfig.autopilot_default === true ? new Date().toISOString() : null,
+    // Frozen messaging brief: editing the agent config later must not silently
+    // rewrite the instructions a campaign was already written against.
+    brief: {
+      tone: input.tone ?? agentConfig.tone,
+      hookStyle: input.hookStyle ?? agentConfig.hook_style,
+      valueProposition: input.valueProposition ?? agentConfig.value_proposition,
+      painPoints: input.painPoints ?? agentConfig.pain_points,
+      objections: input.objections ?? agentConfig.objections,
+      signature: agentConfig.agent_name ?? null,
+      capturedAt: new Date().toISOString(),
+    },
     updated_at: new Date().toISOString(),
   };
 
@@ -253,6 +296,13 @@ export async function updateCampaign(orgId: string, id: string, input: CampaignU
     });
   }
 
+  if (input.productDescription !== undefined) record.product_description = input.productDescription;
+  if (input.valueProposition !== undefined) record.value_proposition = input.valueProposition;
+  if (input.objections !== undefined) record.objections = input.objections;
+  if (input.painPoints !== undefined) record.pain_points = input.painPoints;
+  if (input.tone !== undefined) record.tone = input.tone;
+  if (input.hookStyle !== undefined) record.hook_style = input.hookStyle;
+
   const { data, error } = await supabase
     .from('campaigns')
     .update(record)
@@ -288,6 +338,11 @@ export async function setCampaignStatus(
   const voiceEnabled = usesVoice(current.channel);
 
   if (status === 'active' && emailEnabled) {
+    // Nothing approved means nothing sends. Blocking here rather than letting
+    // the campaign go active is deliberate: an "active" campaign that quietly
+    // sends nothing is discovered days later, if at all.
+    await assertCampaignLaunchable(orgId, id);
+
     const readiness = await getEmailLaunchReadiness(orgId, id);
     // An email-only campaign with nothing send-ready is a hard error. On a
     // 'both' campaign the calls can still carry the launch, so only block when
@@ -339,6 +394,10 @@ export async function setCampaignStatus(
       }
 
       if (voiceEnabled) {
+        // Give this campaign its own Retell agent/LLM before dialing anything.
+        // Any failure here is caught below, which rolls the campaign back to
+        // 'paused' instead of leaving it 'active' with no working agent.
+        await createOrUpdateRetellAgentForCampaign(orgId, id);
         const result = await enqueueVoiceCalls(orgId, id, campaign);
         voiceQueued = result.queued;
         voiceSkipped = result.skipped;
@@ -468,91 +527,58 @@ async function countCallableLeads(orgId: string, campaignId: string, timezone: s
   ).length;
 }
 
+/**
+ * Queues the approved step 1 emails for a launching campaign.
+ *
+ * Only approved messages are queued. Copy is written and validated ahead of
+ * time by the generation pipeline, so launch no longer creates empty message
+ * rows to be filled in at send time - that older shape put unreviewed,
+ * unvalidated text straight onto the wire, and made "nothing sends without
+ * approval" impossible to enforce.
+ *
+ * A campaign reaching here with drafts still unapproved is not an error: the
+ * launch gate already refused a campaign with nothing approved, so this is the
+ * partial case where some emails are cleared and others are not. The cleared
+ * ones send; the rest wait for approval or for autopilot.
+ */
 async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
   console.log(`[campaigns] Preparing initial email queue for campaign ${campaignId}`);
 
-  const { data: firstStep, error: stepError } = await supabase
-    .from('email_sequence_steps')
-    .select('id,step_number')
+  const { data: messages, error: messagesError } = await supabase
+    .from('email_messages')
+    .select('id,lead_id,status,subject,body,leads(id,email,status,do_not_email,email_unsubscribed)')
+    .eq('organization_id', orgId)
     .eq('campaign_id', campaignId)
     .eq('step_number', 1)
-    .maybeSingle();
+    .in('status', ['approved', 'queued']);
 
-  if (stepError) throw new AppError(500, 'Failed to fetch first sequence step', stepError);
-  if (!firstStep) {
-    console.warn(`[campaigns] Campaign ${campaignId} has no step 1 email sequence. Jobs will still be created without a sequence_step_id.`);
-  }
+  if (messagesError) throw new AppError(500, 'Failed to fetch approved campaign emails', messagesError);
 
-  const { data: leads, error: leadsError } = await supabase
-    .from('leads')
-    .select('id,email,status')
-    .eq('organization_id', orgId)
-    .eq('campaign_id', campaignId);
-
-  if (leadsError) throw new AppError(500, 'Failed to fetch campaign leads', leadsError);
-
-  const enrolledLeads = leads ?? [];
-  const eligibleLeads = (leads ?? []).filter(lead =>
-    lead.email &&
-    !STOP_SEQUENCE_STATUSES.includes(lead.status)
-  );
-  const missingEmailCount = enrolledLeads.filter(lead => !lead.email).length;
-  const stoppedCount = enrolledLeads.filter(lead =>
-    lead.email && STOP_SEQUENCE_STATUSES.includes(lead.status)
-  ).length;
-
-  console.log(
-    `[campaigns] Campaign ${campaignId} enrolled=${enrolledLeads.length}, eligible=${eligibleLeads.length}, missing_email=${missingEmailCount}, stopped_status=${stoppedCount}`
-  );
-
+  const candidates = messages ?? [];
   let queued = 0;
+  let skippedSuppressed = 0;
+  let skippedStopped = 0;
 
-  for (const lead of eligibleLeads) {
-    const { data: existing, error: existingError } = await supabase
-      .from('email_messages')
-      .select('id,status')
-      .eq('organization_id', orgId)
-      .eq('campaign_id', campaignId)
-      .eq('lead_id', lead.id)
-      .eq('step_number', 1)
-      .maybeSingle();
+  for (const message of candidates) {
+    const lead = message.leads as unknown as {
+      id: string;
+      email: string | null;
+      status: string;
+      do_not_email: boolean | null;
+      email_unsubscribed: boolean | null;
+    } | null;
 
-    if (existingError) throw new AppError(500, 'Failed to check existing campaign email', existingError);
-    if (existing) {
-      if (existing.status === 'queued') {
-        const job = await enqueueSendEmail({
-          emailMessageId: existing.id,
-          organizationId: orgId,
-          campaignId,
-          leadId: lead.id,
-          stepNumber: 1,
-        }, {
-          jobId: `send-email-${existing.id}`,
-        });
-        queued++;
-        console.log(`[campaigns] Re-queued existing send-email job ${job.id} for message ${existing.id}, lead ${lead.id}, campaign ${campaignId}`);
-      } else {
-        console.log(`[campaigns] Existing step 1 email found for campaign ${campaignId}, lead ${lead.id}, status ${existing.status}. Skipping duplicate queue.`);
-      }
+    if (!lead?.email) continue;
+
+    if (lead.do_not_email === true || lead.email_unsubscribed === true) {
+      skippedSuppressed++;
       continue;
     }
 
-    const { data: message, error: messageError } = await supabase
-      .from('email_messages')
-      .insert({
-        organization_id: orgId,
-        campaign_id: campaignId,
-        lead_id: lead.id,
-        sequence_step_id: firstStep?.id ?? null,
-        step_number: 1,
-        subject: '',
-        body: '',
-        status: 'queued',
-      })
-      .select('id')
-      .single();
-
-    if (messageError || !message) throw new AppError(500, 'Failed to create initial email message', messageError);
+    if (STOP_SEQUENCE_STATUSES.includes(lead.status)) {
+      skippedStopped++;
+      continue;
+    }
 
     const job = await enqueueSendEmail({
       emailMessageId: message.id,
@@ -565,6 +591,7 @@ async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
     });
 
     queued++;
+
     await supabase
       .from('leads')
       .update({ status: 'queued', updated_at: new Date().toISOString() })
@@ -575,7 +602,19 @@ async function enqueueInitialEmailStep(orgId: string, campaignId: string) {
     console.log(`[campaigns] Queued send-email job ${job.id} for message ${message.id}, lead ${lead.id}, campaign ${campaignId}`);
   }
 
-  console.log(`[campaigns] Initial queue complete for campaign ${campaignId}: ${queued} job(s) queued.`);
+  const { count: pendingDrafts } = await supabase
+    .from('email_messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('organization_id', orgId)
+    .eq('campaign_id', campaignId)
+    .eq('step_number', 1)
+    .eq('status', 'draft');
+
+  console.log(
+    `[campaigns] Initial queue complete for campaign ${campaignId}: ${queued} queued, ` +
+    `${pendingDrafts ?? 0} still awaiting approval, ${skippedSuppressed} suppressed, ${skippedStopped} stopped.`
+  );
+
   return queued;
 }
 

@@ -6,6 +6,11 @@ import {
 } from './apollo-data.service';
 import { supabase } from '../lib/supabase';
 import { AppError } from '../types';
+import { enqueueCampaignGeneration } from '../jobs/campaign-generation.job';
+import {
+  finalizeLeadQualification,
+  resolveQualificationPolicy,
+} from './apollo-import.service';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -56,6 +61,52 @@ function normalizeWebhookPerson(input: JsonRecord): ApolloPerson {
 
 function webhookPeople(payload: JsonRecord): JsonRecord[] {
   return asArray(payload.people).map(asRecord).filter(Boolean) as JsonRecord[];
+}
+
+/**
+ * Re-qualifies leads whose enrichment finished via webhook, then triggers
+ * generation for their campaigns.
+ *
+ * Webhook results arrive after the import that requested them has already
+ * reached a terminal state, so nothing else is left to judge these leads or
+ * write their emails. Failures here are logged rather than thrown: Apollo
+ * retries a non-200, and re-delivering a payload we already stored would be a
+ * worse outcome than a lead waiting for the next trigger.
+ */
+async function finalizeWebhookLeads(
+  leads: Array<{ id: string; organization_id: string }>,
+) {
+  if (leads.length === 0) return;
+
+  const byOrg = new Map<string, string[]>();
+  for (const lead of leads) {
+    byOrg.set(lead.organization_id, [...(byOrg.get(lead.organization_id) ?? []), lead.id]);
+  }
+
+  for (const [organizationId, leadIds] of byOrg) {
+    try {
+      const policy = await resolveQualificationPolicy(organizationId);
+      await finalizeLeadQualification({ organizationId, leadIds, policy });
+
+      const { data: campaignLeads } = await supabase
+        .from('leads')
+        .select('campaign_id')
+        .eq('organization_id', organizationId)
+        .in('id', leadIds)
+        .eq('qualification_status', 'qualified')
+        .not('campaign_id', 'is', null);
+
+      const campaignIds = [...new Set((campaignLeads ?? []).map(row => row.campaign_id))].filter(Boolean) as string[];
+      for (const campaignId of campaignIds) {
+        await enqueueCampaignGeneration({ organizationId, campaignId, trigger: 'leads_ready' });
+      }
+    } catch (error) {
+      console.error(
+        '[apollo-webhook] failed to finalize webhook leads:',
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
 }
 
 export async function handleApolloWebhook(payload: unknown) {
@@ -134,9 +185,26 @@ export async function handleApolloWebhook(payload: unknown) {
       for (const lead of linkedLeads) {
         if (processedLeadIds.has(lead.id)) continue;
         await persistApolloPersonToLead(lead.organization_id, lead.id, person);
+
+        // The waterfall has landed, so this lead's facts are final. Without
+        // this it stays in 'awaiting_webhook' forever, is never scored, and
+        // never gets an email - the campaign quietly never finishes.
+        await supabase
+          .from('leads')
+          .update({
+            enrichment_status: 'complete',
+            enrichment_completed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('organization_id', lead.organization_id)
+          .eq('id', lead.id)
+          .eq('enrichment_status', 'awaiting_webhook');
+
         processedLeadIds.add(lead.id);
       }
     }
+
+    await finalizeWebhookLeads(leads.filter(lead => processedLeadIds.has(lead.id)));
 
     const creditCost = typeof body.credits_consumed === 'number' ? body.credits_consumed : null;
     const completedAt = new Date().toISOString();

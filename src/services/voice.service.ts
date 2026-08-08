@@ -1,14 +1,16 @@
-import Retell from 'retell-sdk';
 import { retell } from '../lib/retell';
 import { supabase } from '../lib/supabase';
 import { generateVoicePrompt } from './ai.service';
 import { enqueueScheduleCall } from '../jobs/schedule-call.job';
 import { posthog } from '../lib/posthog';
 import { AppError } from '../types';
-import { env } from '../config/env';
 import { isE164Phone, normalizePhoneForCalling } from '../lib/phone';
 import { contextSnapshotToDynamicVariables, createOrReuseLeadContextSnapshot } from './lead-context.service';
-import { bindActiveRetellPhoneNumbers } from './retell-phone.service';
+import { bindActiveRetellOutboundPhoneNumbers } from './retell-phone.service';
+import { buildOutboundAgentTools } from './retell-agent-tools';
+import { verifyRetellRequest } from './retell-auth.service';
+import { settleInboundOutboundPause } from './inbound-voice.service';
+import { enqueueEnrichLeads } from '../jobs/enrich-leads.job';
 
 const DEFAULT_VOICE_ID = 'openai-Alloy';
 
@@ -20,95 +22,6 @@ const POST_CALL_ANALYSIS_DATA = [
     choices: ['interested', 'not_interested', 'meeting_booked', 'voicemail', 'callback', 'no_answer'],
   },
 ];
-
-// Without this, the LLM can only generate a spoken goodbye - it has no actual
-// mechanism to hang up, so the call stays open indefinitely after the
-// conversation is over until some other timeout intervenes.
-const GENERAL_TOOLS = [
-  {
-    name: 'end_call',
-    type: 'end_call' as const,
-    description: 'End the call when the conversation has naturally concluded, the prospect says goodbye, or asks not to be contacted again.',
-  },
-];
-
-// Real-time booking tools: Retell hits these URLs mid-call, synchronously,
-// while the prospect is still on the line. They're static per-agent (set
-// here, not per-call), so org identity is resolved server-side from the
-// call_id Retell sends - see retell-tools.service.ts.
-function buildMeetingTools() {
-  const toolUrl = (name: string) => `${env.BACKEND_PUBLIC_URL}/webhooks/retell/tools/${name}`;
-  const headers = { 'x-tool-secret': env.RETELL_TOOL_SECRET };
-
-  return [
-    {
-      name: 'check_availability',
-      type: 'custom' as const,
-      url: toolUrl('check-availability'),
-      method: 'POST' as const,
-      headers,
-      description: 'Look up open meeting slots on our calendar. Call this right after the prospect agrees to a meeting, and again if they reject the offered times after telling you their preferred day or time of day.',
-      speak_during_execution: true,
-      speak_after_execution: true,
-      timeout_ms: 8000,
-      parameters: {
-        type: 'object' as const,
-        properties: {
-          preferred_day: { type: 'string', description: 'The day the prospect prefers, e.g. "Tuesday" or "next week", if they stated one. Omit otherwise.' },
-          preferred_time_of_day: { type: 'string', enum: ['morning', 'afternoon', 'evening'], description: 'Time of day the prospect prefers, if stated.' },
-        },
-      },
-    },
-    {
-      name: 'book_meeting',
-      type: 'custom' as const,
-      url: toolUrl('book-meeting'),
-      method: 'POST' as const,
-      headers,
-      description: 'Lock in the meeting at the exact slot the prospect just verbally agreed to. Only call this once, right after they confirm a specific time from check_availability results - it books immediately with no further confirmation step.',
-      speak_during_execution: true,
-      speak_after_execution: true,
-      timeout_ms: 8000,
-      parameters: {
-        type: 'object' as const,
-        properties: {
-          start_at: { type: 'string', description: 'The exact ISO 8601 start time of the slot the prospect agreed to, copied exactly from a check_availability result.' },
-        },
-        required: ['start_at'],
-      },
-    },
-    {
-      name: 'reschedule_meeting',
-      type: 'custom' as const,
-      url: toolUrl('reschedule-meeting'),
-      method: 'POST' as const,
-      headers,
-      description: "Move this prospect's existing booked meeting to a new time. Call check_availability first to find a new open slot, then call this once they agree to one.",
-      speak_during_execution: true,
-      speak_after_execution: true,
-      timeout_ms: 8000,
-      parameters: {
-        type: 'object' as const,
-        properties: {
-          new_start_at: { type: 'string', description: 'The new ISO 8601 start time the prospect agreed to.' },
-        },
-        required: ['new_start_at'],
-      },
-    },
-    {
-      name: 'cancel_meeting',
-      type: 'custom' as const,
-      url: toolUrl('cancel-meeting'),
-      method: 'POST' as const,
-      headers,
-      description: "Cancel this prospect's existing booked meeting if they no longer want it and don't want to reschedule.",
-      speak_during_execution: true,
-      speak_after_execution: true,
-      timeout_ms: 8000,
-      parameters: { type: 'object' as const, properties: {} },
-    },
-  ];
-}
 
 export async function createOrUpdateRetellAgent(organizationId: string) {
   const { data: agentConfig, error } = await supabase
@@ -134,7 +47,7 @@ export async function createOrUpdateRetellAgent(organizationId: string) {
       };
     } else {
       // Backward-compatible default while organizations migrate to Flow.
-      const llm = await retell.llm.create({ general_prompt: prompt ?? '', general_tools: [...GENERAL_TOOLS, ...buildMeetingTools()] }).catch((err: any) => {
+      const llm = await retell.llm.create({ general_prompt: prompt ?? '', general_tools: buildOutboundAgentTools() as any }).catch((err: any) => {
         throw new AppError(502, `Failed to create Retell LLM: ${err.message}`);
       });
       llmId = llm.llm_id;
@@ -155,7 +68,7 @@ export async function createOrUpdateRetellAgent(organizationId: string) {
       .update({ retell_agent_id: agent.agent_id, retell_llm_id: llmId })
       .eq('organization_id', organizationId);
 
-    await bindActiveRetellPhoneNumbers(organizationId, agent.agent_id);
+    await bindActiveRetellOutboundPhoneNumbers(organizationId, agent.agent_id);
 
     return { agentId: agent.agent_id };
   }
@@ -171,7 +84,7 @@ export async function createOrUpdateRetellAgent(organizationId: string) {
     };
   } else {
     const llmId = agentConfig.retell_llm_id ?? await resolveLlmId(agentConfig.retell_agent_id, organizationId);
-    await retell.llm.update(llmId, { general_prompt: prompt ?? '', general_tools: [...GENERAL_TOOLS, ...buildMeetingTools()] }).catch((err: any) => {
+    await retell.llm.update(llmId, { general_prompt: prompt ?? '', general_tools: buildOutboundAgentTools() as any }).catch((err: any) => {
       throw new AppError(502, `Failed to update Retell LLM: ${err.message}`);
     });
     responseEngine = { type: 'retell-llm', llm_id: llmId };
@@ -184,9 +97,59 @@ export async function createOrUpdateRetellAgent(organizationId: string) {
     console.warn(`[voice] Failed to update agent analysis config: ${err.message}`);
   });
 
-  await bindActiveRetellPhoneNumbers(organizationId, agentConfig.retell_agent_id);
+  await bindActiveRetellOutboundPhoneNumbers(organizationId, agentConfig.retell_agent_id);
 
   return { agentId: agentConfig.retell_agent_id };
+}
+
+// Each voice/both-channel campaign gets its own Retell agent + LLM, so
+// campaigns with different pitches/objections don't share one conversation
+// flow. Deliberately does not bind the org's shared number: outbound calls
+// select the campaign agent per-call via override_agent_id, while inbound is
+// configured independently through the signed inbound webhook.
+export async function createOrUpdateRetellAgentForCampaign(organizationId: string, campaignId: string) {
+  const { data: campaign, error } = await supabase
+    .from('campaigns')
+    .select('id, name, retell_agent_id, retell_llm_id')
+    .eq('id', campaignId)
+    .eq('organization_id', organizationId)
+    .single();
+  if (error || !campaign) throw new AppError(404, 'Campaign not found');
+
+  const { prompt } = await generateVoicePrompt(organizationId, { campaignId });
+  const tools = buildOutboundAgentTools();
+
+  if (!campaign.retell_agent_id) {
+    const llm = await retell.llm.create({ general_prompt: prompt ?? '', general_tools: tools as any }).catch((err: any) => {
+      throw new AppError(502, `Failed to create Retell LLM: ${err.message}`);
+    });
+    const agent = await retell.agent.create({
+      agent_name: campaign.name,
+      response_engine: { type: 'retell-llm', llm_id: llm.llm_id },
+      voice_id: DEFAULT_VOICE_ID,
+      post_call_analysis_data: POST_CALL_ANALYSIS_DATA,
+    }).catch((err: any) => {
+      throw new AppError(502, `Failed to create Retell agent: ${err.message}`);
+    });
+
+    await supabase
+      .from('campaigns')
+      .update({ retell_agent_id: agent.agent_id, retell_llm_id: llm.llm_id })
+      .eq('id', campaignId);
+
+    return { agentId: agent.agent_id };
+  }
+
+  await retell.llm.update(campaign.retell_llm_id!, { general_prompt: prompt ?? '', general_tools: tools as any }).catch((err: any) => {
+    throw new AppError(502, `Failed to update Retell LLM: ${err.message}`);
+  });
+  await retell.agent.update(campaign.retell_agent_id, {
+    post_call_analysis_data: POST_CALL_ANALYSIS_DATA,
+  }).catch((err: any) => {
+    throw new AppError(502, `Failed to update Retell agent: ${err.message}`);
+  });
+
+  return { agentId: campaign.retell_agent_id };
 }
 
 // Retrieve llm_id from Retell when it's missing from our DB (edge case for old records)
@@ -226,18 +189,45 @@ export async function scheduleCall(
     .eq('organization_id', organizationId)
     .single();
 
-  if (!agentConfig?.retell_agent_id) {
-    throw new AppError(400, 'No Retell agent configured for this organization');
+  const { data: campaignRow } = await supabase
+    .from('campaigns')
+    .select('retell_agent_id')
+    .eq('id', campaignId)
+    .eq('organization_id', organizationId)
+    .maybeSingle();
+
+  // Campaigns launched before per-campaign agents shipped fall back to the
+  // org's shared agent.
+  const agentId = campaignRow?.retell_agent_id ?? agentConfig?.retell_agent_id;
+  if (!agentId) {
+    throw new AppError(400, 'No Retell agent configured for this campaign');
   }
 
   const { data: lead } = await supabase
     .from('leads')
-    .select('id, first_name, last_name, name, title, company, email, account_id, headline, department, job_function, seniority, city, state, country, last_apollo_enriched_at, updated_at, created_at')
+    .select('id, first_name, last_name, name, title, company, email, account_id, headline, department, job_function, seniority, city, state, country, status, outbound_paused_at, outbound_pause_reason, outbound_resume_at, last_apollo_enriched_at, updated_at, created_at')
     .eq('id', leadId)
     .eq('organization_id', organizationId)
     .single();
 
   if (!lead) throw new AppError(404, 'Lead not found');
+  if (['engaged', 'meeting_booked', 'not_interested', 'unsubscribed'].includes(lead.status)) {
+    return { success: false, reason: 'sequence_stopped', leadStatus: lead.status };
+  }
+  if (lead.outbound_paused_at) {
+    const resumeAt = lead.outbound_resume_at ? new Date(lead.outbound_resume_at).getTime() : null;
+    if (!resumeAt || resumeAt > Date.now()) {
+      const delayMs = resumeAt ? Math.max(1_000, resumeAt - Date.now()) : 5 * 60 * 1000;
+      await enqueueScheduleCall({ organizationId, campaignId, leadId, fromNumber, toNumber }, delayMs);
+      return { success: false, reason: 'outbound_paused_for_inbound', requeued: true, delayMs };
+    }
+    await supabase.from('leads').update({
+      outbound_paused_at: null,
+      outbound_pause_reason: null,
+      outbound_resume_at: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', leadId).eq('organization_id', organizationId);
+  }
 
   const contextSnapshot = await createOrReuseLeadContextSnapshot(
     organizationId,
@@ -257,6 +247,7 @@ export async function scheduleCall(
       from_number: fromNumber,
       to_number: toNumber,
       status: 'queued',
+      direction: 'outbound',
     })
     .select('id')
     .single();
@@ -267,7 +258,7 @@ export async function scheduleCall(
     const call = await retell.call.createPhoneCall({
       from_number: fromNumber,
       to_number: toNumber,
-      override_agent_id: agentConfig.retell_agent_id,
+      override_agent_id: agentId,
       retell_llm_dynamic_variables: contextSnapshotToDynamicVariables(contextSnapshot, lead),
     });
 
@@ -294,7 +285,7 @@ export async function scheduleCall(
 export async function callLeadNow(organizationId: string, leadId: string) {
   const { data: lead, error: leadError } = await supabase
     .from('leads')
-    .select('id,campaign_id,phone,status,campaigns(id,channel,voice_mode,timezone)')
+    .select('id,campaign_id,phone,status,outbound_paused_at,outbound_resume_at,campaigns(id,channel,voice_mode,timezone)')
     .eq('organization_id', organizationId)
     .eq('id', leadId)
     .maybeSingle();
@@ -303,8 +294,11 @@ export async function callLeadNow(organizationId: string, leadId: string) {
   if (!lead) throw new AppError(404, 'Lead not found');
   if (!lead.phone) throw new AppError(400, 'Lead has no phone number');
   if (!lead.campaign_id) throw new AppError(400, 'Lead is not attached to a campaign');
-  if (['meeting_booked', 'not_interested', 'unsubscribed'].includes(lead.status)) {
+  if (['engaged', 'meeting_booked', 'not_interested', 'unsubscribed'].includes(lead.status)) {
     throw new AppError(400, `Lead status is ${lead.status}; calls are stopped for this lead`);
+  }
+  if (lead.outbound_paused_at && (!lead.outbound_resume_at || new Date(lead.outbound_resume_at).getTime() > Date.now())) {
+    throw new AppError(409, 'Outbound contact is paused because this lead called in');
   }
 
   const campaign = lead.campaigns as unknown as { channel?: string; voice_mode?: string; timezone?: string } | null;
@@ -366,21 +360,29 @@ export async function callLeadNow(organizationId: string, leadId: string) {
 
 export async function handleRetellWebhook(rawBody: Buffer, signature: string) {
   const bodyStr = rawBody.toString('utf-8');
-
-  if (!env.RETELL_WEBHOOK_SECRET) {
-    throw new AppError(500, 'RETELL_WEBHOOK_SECRET is not configured — refusing to process unverified webhook');
-  }
-  const valid = Retell.verify(bodyStr, env.RETELL_WEBHOOK_SECRET, signature);
-  if (!valid) throw new AppError(401, 'Invalid webhook signature');
+  verifyRetellRequest(rawBody, signature);
 
   const payload = JSON.parse(bodyStr) as { event: string; call: Record<string, any> };
   const { event, call } = payload;
 
-  const { data: callRecord } = await supabase
+  let { data: callRecord } = await supabase
     .from('calls')
-    .select('id, lead_id, organization_id, campaign_id')
+    .select('id, lead_id, organization_id, campaign_id, direction, identity_status, identity_confirmed, substantive_conversation, requested_no_future_contact, disposition, from_number')
     .eq('retell_call_id', call.call_id)
-    .single();
+    .maybeSingle();
+
+  const internalCallId = call.metadata?.gnx_call_id;
+  if (!callRecord && internalCallId) {
+    const result = await supabase
+      .from('calls')
+      .select('id, lead_id, organization_id, campaign_id, direction, identity_status, identity_confirmed, substantive_conversation, requested_no_future_contact, disposition, from_number')
+      .eq('id', internalCallId)
+      .maybeSingle();
+    callRecord = result.data;
+    if (callRecord && call.call_id) {
+      await supabase.from('calls').update({ retell_call_id: call.call_id }).eq('id', callRecord.id);
+    }
+  }
 
   if (!callRecord) return; // Call we didn't initiate — ignore
 
@@ -393,10 +395,30 @@ export async function handleRetellWebhook(rawBody: Buffer, signature: string) {
 
   if (event === 'call_ended') {
     const isVoicemail = call.call_analysis?.in_voicemail === true;
+    const startedAt = call.start_timestamp ? new Date(call.start_timestamp).getTime() : null;
+    const endedAt = call.end_timestamp ? new Date(call.end_timestamp).getTime() : Date.now();
+    const durationSeconds = typeof call.duration_ms === 'number'
+      ? Math.max(0, Math.ceil(call.duration_ms / 1000))
+      : startedAt ? Math.max(0, Math.ceil((endedAt - startedAt) / 1000)) : null;
     await supabase.from('calls').update({
       status: isVoicemail ? 'voicemail' : 'completed',
-      ended_at: call.end_timestamp ? new Date(call.end_timestamp).toISOString() : new Date().toISOString(),
+      ended_at: new Date(endedAt).toISOString(),
+      duration_seconds: durationSeconds,
     }).eq('id', callRecord.id);
+
+    if (callRecord.direction === 'inbound' && callRecord.identity_status === 'created_inbound' && callRecord.lead_id) {
+      await enqueueEnrichLeads({
+        organizationId: callRecord.organization_id,
+        campaignId: null,
+        leadIds: [callRecord.lead_id],
+      }, { jobId: `inbound-enrich-${callRecord.id}` });
+    }
+    if (callRecord.direction === 'inbound' && !callRecord.substantive_conversation && !callRecord.requested_no_future_contact) {
+      // Establish the safe fallback immediately. A later analyzed event can
+      // replace this with a permanent stop when identity and substance are
+      // confirmed; if analysis never arrives, automation resumes after 24h.
+      await settleInboundOutboundPause({ ...callRecord, disposition: null, substantive_conversation: false });
+    }
 
     posthog?.capture({
       distinctId: callRecord.organization_id,
@@ -406,13 +428,41 @@ export async function handleRetellWebhook(rawBody: Buffer, signature: string) {
   }
 
   if (event === 'call_analyzed') {
-    const disposition = (call.call_analysis?.custom_analysis_data as Record<string, string> | undefined)?.disposition ?? null;
+    const analysis = call.call_analysis?.custom_analysis_data as Record<string, any> | undefined;
+    const disposition = analysis?.disposition ?? null;
+    const identityConfirmed = analysis?.identity_confirmed === true || callRecord.identity_confirmed;
+    const substantiveConversation = analysis?.substantive_conversation === true;
+    const requestedNoFutureContact = analysis?.requested_no_future_contact === true;
 
     await supabase.from('calls').update({
-      transcript: call.transcript ?? null,
-      recording_url: call.recording_url ?? null,
+      // Inbound agents use basic_attributes_only. Never copy transient Retell
+      // artifacts into our database even if a provider payload includes them.
+      transcript: callRecord.direction === 'inbound' ? null : call.transcript ?? null,
+      recording_url: callRecord.direction === 'inbound' ? null : call.recording_url ?? null,
       disposition,
+      identity_confirmed: identityConfirmed,
+      substantive_conversation: substantiveConversation,
+      requested_no_future_contact: requestedNoFutureContact,
     }).eq('id', callRecord.id);
+
+    if (requestedNoFutureContact && callRecord.lead_id) {
+      await supabase.from('leads').update({
+        do_not_call: true,
+        status: 'not_interested',
+        outbound_pause_reason: 'caller_requested_no_future_contact',
+        outbound_resume_at: null,
+        updated_at: new Date().toISOString(),
+      }).eq('organization_id', callRecord.organization_id).eq('id', callRecord.lead_id);
+    }
+
+    if (callRecord.direction === 'inbound' && !requestedNoFutureContact) {
+      await settleInboundOutboundPause({
+        ...callRecord,
+        disposition,
+        identity_confirmed: identityConfirmed,
+        substantive_conversation: substantiveConversation || requestedNoFutureContact,
+      });
+    }
 
     // book_meeting already sets lead.status in real time when the agent
     // actually locks a slot mid-call - that's the authoritative signal. This
@@ -424,7 +474,7 @@ export async function handleRetellWebhook(rawBody: Buffer, signature: string) {
       .eq('call_id', callRecord.id)
       .maybeSingle();
 
-    if (disposition === 'meeting_booked' && !realTimeMeeting) {
+    if (disposition === 'meeting_booked' && !realTimeMeeting && callRecord.lead_id) {
       await supabase.from('leads').update({ status: 'meeting_booked' }).eq('id', callRecord.lead_id);
 
       posthog?.capture({
@@ -446,6 +496,7 @@ export async function retryCall(callId: string, orgId: string) {
 
   if (!call) throw new AppError(404, 'Call not found');
   if (call.status !== 'failed') throw new AppError(400, 'Only failed calls can be retried');
+  if (call.direction === 'inbound') throw new AppError(400, 'Inbound calls cannot be retried as outbound calls');
 
   await enqueueScheduleCall({
     leadId: call.lead_id,
