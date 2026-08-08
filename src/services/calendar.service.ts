@@ -263,6 +263,22 @@ function assertMeetsNotice(settings: CalendarSettings, start: Date) {
   }
 }
 
+// Guards against the agent booking a slot it never actually got from
+// check_availability (e.g. a hallucinated start_at on a weekend or outside
+// business hours) - the LLM is instructed to only pass back slots it was
+// given, but this is the enforcement backstop.
+function assertWithinBusinessHours(settings: CalendarSettings, start: Date) {
+  if (!settings.workingDays.includes(localDayOfWeek(settings.timezone, start))) {
+    throw new AppError(409, 'That day is not available for booking. Please offer the prospect a different day.');
+  }
+  const dayStart = localTimeToUtc(settings.timezone, start, settings.dayStartTime);
+  const dayEnd = localTimeToUtc(settings.timezone, start, settings.dayEndTime);
+  const durationMs = settings.meetingDurationMinutes * 60_000;
+  if (start.getTime() < dayStart.getTime() || start.getTime() + durationMs > dayEnd.getTime()) {
+    throw new AppError(409, 'That time is outside business hours. Please offer the prospect a different time.');
+  }
+}
+
 export async function bookMeeting(
   organizationId: string,
   input: { leadId: string | null; campaignId: string | null; callId: string | null; startAt: string },
@@ -272,6 +288,7 @@ export async function bookMeeting(
   const settings = await getCalendarSettings(organizationId);
   const start = new Date(input.startAt);
   assertMeetsNotice(settings, start);
+  assertWithinBusinessHours(settings, start);
 
   const { data: lead, error: leadError } = await supabase
     .from('leads')
@@ -320,6 +337,7 @@ export async function rescheduleMeetingForLead(organizationId: string, leadId: s
   const settings = await getCalendarSettings(organizationId);
   const start = new Date(newStartAt);
   assertMeetsNotice(settings, start);
+  assertWithinBusinessHours(settings, start);
 
   const { data, error } = await supabase
     .from('meetings')
