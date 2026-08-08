@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { env } from '../config/env';
 import { AppError } from '../types';
+import { isCalendarConfigured } from './calendar.service';
 
 /**
  * Guided setup state for an organization.
@@ -170,7 +171,6 @@ export type IntegrationState = {
 
 export type IntegrationStates = {
   gmail: IntegrationState;
-  calendar: IntegrationState;
   apollo: IntegrationState;
   retell: IntegrationState & { phoneNumber: string | null; agentReady: boolean };
 };
@@ -214,19 +214,13 @@ function isFilled(value: unknown, minLength = 1): boolean {
 }
 
 export async function getIntegrationStates(organizationId: string): Promise<IntegrationStates> {
-  const [gmailResult, calendarResult, phoneResult, agentConfigResult, apolloLeadResult] = await Promise.all([
+  const [gmailResult, phoneResult, agentConfigResult, apolloLeadResult] = await Promise.all([
     supabase
       .from('connected_accounts')
       .select('provider,provider_account_id,is_active,updated_at')
       .eq('organization_id', organizationId)
       .in('provider', ['gmail', 'smtp'])
       .order('updated_at', { ascending: false }),
-    supabase
-      .from('calendar_connections')
-      .select('connected_email,status,selected_calendar_name,timezone,last_error,access_token,refresh_token')
-      .eq('organization_id', organizationId)
-      .eq('provider', 'google')
-      .maybeSingle(),
     supabase
       .from('retell_phone_numbers')
       .select('phone_number,status,error_message')
@@ -263,37 +257,6 @@ export async function getIntegrationStates(organizationId: string): Promise<Inte
         status: 'disconnected',
         label: null,
         detail: 'No email account is connected yet. Connect Gmail or a custom SMTP/IMAP mailbox before sending.',
-      };
-
-  const calendarRow = calendarResult.data as
-    | {
-        connected_email: string | null;
-        status: string | null;
-        selected_calendar_name: string | null;
-        timezone: string | null;
-        last_error: string | null;
-        access_token: string | null;
-        refresh_token: string | null;
-      }
-    | null;
-
-  const calendarConnected = Boolean(
-    calendarRow && calendarRow.status === 'connected' && calendarRow.access_token && calendarRow.refresh_token,
-  );
-  const calendar: IntegrationState = calendarConnected
-    ? {
-        connected: true,
-        status: 'connected',
-        label: calendarRow?.connected_email ?? null,
-        detail: `Booking into ${calendarRow?.selected_calendar_name || 'the primary calendar'} (${calendarRow?.timezone || 'UTC'}).`,
-      }
-    : {
-        connected: false,
-        status: calendarRow?.status === 'error' ? 'error' : 'disconnected',
-        label: calendarRow?.connected_email ?? null,
-        detail: calendarRow?.status === 'error'
-          ? 'Google Calendar needs to be reconnected before meetings can be booked.'
-          : 'Google Calendar is not connected. Meetings still appear here, but the agent cannot book slots.',
       };
 
   const apolloEnrichedCount = apolloLeadResult.count ?? 0;
@@ -358,7 +321,7 @@ export async function getIntegrationStates(organizationId: string): Promise<Inte
     agentReady: Boolean(retellAgentId),
   };
 
-  return { gmail, calendar, apollo, retell };
+  return { gmail, apollo, retell };
 }
 
 // ---------------------------------------------------------------------------
@@ -400,10 +363,11 @@ export function summarizeSteps(steps: SetupStep[]): SetupSummary {
 }
 
 export async function getSetupState(organizationId: string): Promise<SetupState> {
-  const [progress, integrations, agentConfigResult, leadsResult, campaignsResult, activeCampaignsResult, messagesResult] =
+  const [progress, integrations, calendarConfigured, agentConfigResult, leadsResult, campaignsResult, activeCampaignsResult, messagesResult] =
     await Promise.all([
       loadProgressRow(organizationId),
       getIntegrationStates(organizationId),
+      isCalendarConfigured(organizationId),
       supabase
         .from('agent_configs')
         .select(AGENT_CONFIG_COLUMNS)
@@ -466,12 +430,9 @@ export async function getSetupState(organizationId: string): Promise<SetupState>
       ? { status: 'complete', detail: integrations.gmail.detail }
       : { status: 'incomplete', detail: integrations.gmail.detail },
 
-    calendar: integrations.calendar.connected
-      ? { status: 'complete', detail: integrations.calendar.detail }
-      : {
-          status: integrations.calendar.status === 'error' ? 'blocked' : 'incomplete',
-          detail: integrations.calendar.detail,
-        },
+    calendar: calendarConfigured
+      ? { status: 'complete', detail: 'Working hours, meeting length, and notice window are set.' }
+      : { status: 'incomplete', detail: 'Confirm your working hours and timezone so the agent books real slots, not guessed ones.' },
 
     apollo: integrations.apollo.status === 'not_configured'
       ? { status: 'unavailable', detail: integrations.apollo.detail }

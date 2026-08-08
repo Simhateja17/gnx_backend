@@ -6,7 +6,6 @@ const { supabaseMock, integrationsMock, campaignsMock, clearDraftMock } = vi.hoi
   integrationsMock: {
     value: {
       gmail: { connected: true, status: 'connected', label: 'sales@x.com', detail: '' },
-      calendar: { connected: true, status: 'connected', label: null, detail: '' },
       apollo: { connected: true, status: 'connected', label: null, detail: '' },
       retell: { connected: true, status: 'connected', label: null, detail: '', phoneNumber: '+15550001111', agentReady: true },
     },
@@ -192,15 +191,6 @@ describe('readiness checks', () => {
 
     expect(readiness.ok).toBe(false);
     expect(readiness.blockers[0]).toMatch(/provisioned/i);
-  });
-
-  it('warns rather than blocks when Calendar is disconnected', async () => {
-    integrationsMock.value.calendar = { connected: false, status: 'disconnected', label: null, detail: '' } as any;
-
-    const readiness = await checkCampaignReadiness(ORG, 'email', []);
-
-    expect(readiness.ok).toBe(true);
-    expect(readiness.warnings.join(' ')).toMatch(/Google Calendar is not connected/i);
   });
 
   it('blocks when no selected lead is contactable on the chosen channel', async () => {
